@@ -261,6 +261,7 @@ EOF
 }
 
 @test "deletion success branch routes keep_app=true rows to kept_items, not success_items" {
+    # shellcheck disable=SC2016 # regex pattern; literal $app_path is intentional
     run grep -nE 'kept_items\+=\("\$app_path"\)' "${BATS_TEST_DIRNAME}/../lib/uninstall/batch.sh"
     [ "$status" -eq 0 ]
     run grep -nE 'kept_count=\$\(\(kept_count \+ 1\)\)' "${BATS_TEST_DIRNAME}/../lib/uninstall/batch.sh"
@@ -287,8 +288,9 @@ EOF
         # inside stop_launch_services. Easiest: extract the function body and
         # grep again.
         body=$(awk '/^stop_launch_services\(\) \{/,/^}/' "${BATS_TEST_DIRNAME}/../lib/uninstall/batch.sh")
-        echo "$body" | grep -E '^[[:space:]]*safe_(sudo_)?remove[[:space:]]'
-        [ "$?" -ne 0 ]
+        if echo "$body" | grep -nE '^[[:space:]]*safe_(sudo_)?remove[[:space:]]'; then
+            return 1
+        fi
     fi
 }
 
