@@ -769,7 +769,7 @@ scan_applications() {
     ) &
     spinner_pid=$!
 
-    for app_data_tuple in "${app_data_tuples[@]}"; do
+    for app_data_tuple in "${app_data_tuples[@]+"${app_data_tuples[@]}"}"; do
         ((app_count++))
         process_app_metadata "$app_data_tuple" "$scan_raw_file" &
         pids+=($!)
@@ -781,7 +781,7 @@ scan_applications() {
         fi
     done
 
-    for pid in "${pids[@]}"; do
+    for pid in "${pids[@]+"${pids[@]}"}"; do
         wait "$pid" 2> /dev/null
     done
 
