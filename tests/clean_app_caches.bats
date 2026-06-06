@@ -352,6 +352,25 @@ EOF
     [[ "$output" == *"Zed logs"* ]]
 }
 
+@test "clean_code_editors includes VS Code WebStorage CacheStorage only" {
+    mkdir -p "$HOME/Library/Application Support/Code/WebStorage/29/CacheStorage/uuid-1"
+    mkdir -p "$HOME/Library/Application Support/Code/WebStorage/29/Local Storage"
+    touch "$HOME/Library/Application Support/Code/WebStorage/29/QuotaManager"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { echo "CLEAN:$1|$2"; }
+clean_code_editors
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN:$HOME/Library/Application Support/Code/WebStorage/29/CacheStorage/uuid-1|VS Code webview cache"* ]]
+    [[ "$output" != *"Local Storage"* ]]
+    [[ "$output" != *"QuotaManager"* ]]
+}
+
 @test "clean_shell_utils includes Warp and Ghostty caches" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
 set -euo pipefail
@@ -465,6 +484,43 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"Stremio cache"* ]]
     [[ "$output" == *"Stremio server cache"* ]]
+}
+
+@test "clean_video_players cleans SenPlayer videoCache but not sibling data (#1070)" {
+    local sen="$HOME/Library/Containers/com.wuziqi.SenPlayer/Data"
+    mkdir -p "$sen/tmp/videoCache" "$sen/Documents"
+    touch "$sen/tmp/videoCache/segment.mp4" "$sen/Documents/saved.mp4"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { local arg; for arg in "$@"; do printf 'CLEAN:%s\n' "$arg"; done; }
+clean_video_players
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN:$HOME/Library/Containers/com.wuziqi.SenPlayer/Data/tmp/videoCache/segment.mp4"* &&
+        "$output" != *"SenPlayer/Data/Documents"* ]]
+}
+
+@test "clean_productivity_apps cleans Folo Cache_Data but not sibling data (#1070)" {
+    local folo="$HOME/Library/Containers/is.follow/Data/Library/Application Support/Folo"
+    mkdir -p "$folo/Cache/Cache_Data"
+    touch "$folo/Cache/Cache_Data/blob" "$folo/Cache/other.bin" "$folo/db.sqlite"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/app_caches.sh"
+safe_clean() { local arg; for arg in "$@"; do printf 'CLEAN:%s\n' "$arg"; done; }
+clean_productivity_apps
+EOF
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CLEAN:$HOME/Library/Containers/is.follow/Data/Library/Application Support/Folo/Cache/Cache_Data/blob"* &&
+        "$output" != *"Folo/Cache/other.bin"* &&
+        "$output" != *"db.sqlite"* ]]
 }
 
 @test "clean_editor_obsolete_extensions removes only dirs listed in .obsolete (#910)" {
@@ -609,49 +665,6 @@ EOF
     [[ "$output" == *"Tencent Video old installer"* ]]
     [[ "$output" == *"Tencent Video native cache"* ]]
     [[ "$output" == *"Tencent Video document cache"* ]]
-}
-
-@test "clean_video_players cleans SenPlayer videoCache but not sibling data (#1070)" {
-    local sen="$HOME/Library/Containers/com.wuziqi.SenPlayer/Data"
-    mkdir -p "$sen/tmp/videoCache" "$sen/Documents"
-    touch "$sen/tmp/videoCache/segment.mp4" "$sen/Documents/saved.mp4"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/app_caches.sh"
-safe_clean() { local arg; for arg in "$@"; do printf 'CLEAN:%s\n' "$arg"; done; }
-clean_video_players
-EOF
-
-    [ "$status" -eq 0 ]
-    # Combined into one assertion: bats only checks the LAST command's status, so
-    # positive + negative must share a line or a widened matcher slips through green.
-    # Negative is dir-level ("Data/Documents") to catch a widening to Data/*, which
-    # expands to the directory, not the file.
-    [[ "$output" == *"CLEAN:$HOME/Library/Containers/com.wuziqi.SenPlayer/Data/tmp/videoCache/segment.mp4"* &&
-        "$output" != *"SenPlayer/Data/Documents"* ]]
-}
-
-@test "clean_productivity_apps cleans Folo Cache but not sibling data (#1070)" {
-    local folo="$HOME/Library/Containers/is.follow/Data/Library/Application Support/Folo"
-    mkdir -p "$folo/Cache"
-    touch "$folo/Cache/blob.bin" "$folo/db.sqlite"
-
-    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
-set -euo pipefail
-source "$PROJECT_ROOT/lib/core/common.sh"
-source "$PROJECT_ROOT/lib/clean/app_caches.sh"
-safe_clean() { local arg; for arg in "$@"; do printf 'CLEAN:%s\n' "$arg"; done; }
-clean_productivity_apps
-EOF
-
-    [ "$status" -eq 0 ]
-    # One assertion (bats checks only the last command): the Cache file is cleaned AND
-    # the sibling SQLite store is untouched. Folo has no should_protect_path backstop,
-    # so the trailing /Cache/* is the sole guard against deleting db.sqlite.
-    [[ "$output" == *"CLEAN:$HOME/Library/Containers/is.follow/Data/Library/Application Support/Folo/Cache/blob.bin"* &&
-        "$output" != *"db.sqlite"* ]]
 }
 
 @test "clean_productivity_apps includes Spacedrive thumbnail cache" {

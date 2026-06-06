@@ -164,6 +164,7 @@ clean_code_editors() {
     safe_clean ~/Library/Application\ Support/Code/Cache/* "VS Code cache"
     safe_clean ~/Library/Application\ Support/Code/CachedExtensions/* "VS Code extension cache"
     safe_clean ~/Library/Application\ Support/Code/CachedData/* "VS Code data cache"
+    safe_clean ~/Library/Application\ Support/Code/WebStorage/*/CacheStorage/* "VS Code webview cache"
     safe_clean ~/Library/Caches/com.sublimetext.*/* "Sublime Text cache"
     safe_clean ~/Library/Caches/Zed/* "Zed cache"
     safe_clean ~/Library/Logs/Zed/* "Zed logs"
@@ -370,12 +371,9 @@ clean_productivity_apps() {
     safe_clean ~/Library/Application\ Support/Quark/Cache/videoCache/* "Quark video cache"
     safe_clean ~/Library/Containers/com.ranchero.NetNewsWire-Evergreen/Data/Library/Caches/* "NetNewsWire cache"
     safe_clean ~/Library/Containers/com.ideasoncanvas.mindnode/Data/Library/Caches/* "MindNode cache"
-    # Folo (RSS reader) lives under Application Support, NOT Data/Library/Caches, so
-    # should_protect_path gives it no backstop: the trailing /Cache/* is the sole guard
-    # keeping the sibling SQLite store (Folo/db.sqlite) out of scope. Keep it exact (#1070).
-    safe_clean ~/Library/Containers/is.follow/Data/Library/Application\ Support/Folo/Cache/* "Folo cache"
     safe_clean ~/.cache/kaku/* "Kaku cache"
     safe_clean ~/Library/Application\ Support/spacedrive/thumbnails/* "Spacedrive thumbnail cache"
+    safe_clean ~/Library/Containers/is.follow/Data/Library/Application\ Support/Folo/Cache/Cache_Data/* "Folo cache"
 }
 # Music/media players (protect Spotify offline music).
 clean_media_players() {
@@ -436,10 +434,9 @@ clean_video_players() {
         safe_clean "$_tenvideo_as/documentCache"/* "Tencent Video document cache"
     fi
     safe_clean ~/Library/Caches/tv.danmaku.bili/* "Bilibili cache"
-    # SenPlayer sandboxed container: streamed video cache (#1070).
-    safe_clean ~/Library/Containers/com.wuziqi.SenPlayer/Data/tmp/videoCache/* "SenPlayer video cache"
     safe_clean ~/Library/Caches/com.douyu.*/* "Douyu cache"
     safe_clean ~/Library/Caches/com.huya.*/* "Huya cache"
+    safe_clean ~/Library/Containers/com.wuziqi.SenPlayer/Data/tmp/videoCache/* "SenPlayer video cache"
     safe_clean ~/Library/Caches/smart.stremio*/* "Stremio cache"
     if [[ -d ~/Library/Application\ Support/stremio ]]; then
         safe_clean ~/Library/Application\ Support/stremio/stremio-server/stremio-cache/* "Stremio server cache"

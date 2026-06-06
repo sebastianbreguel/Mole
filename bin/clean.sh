@@ -193,6 +193,19 @@ read_clean_sudo_choice() {
     printf '%s\n' "$choice"
 }
 
+read_clean_sudo_password_remainder() {
+    local __remainder_var="$1"
+    local remainder=""
+
+    if [[ -r /dev/tty ]]; then
+        IFS= read -r -s remainder < /dev/tty || true
+    else
+        IFS= read -r -s remainder || true
+    fi
+
+    printf -v "$__remainder_var" '%s' "$remainder"
+}
+
 prompt_for_system_clean() {
     local prompt_attempt=0
     while true; do
@@ -213,7 +226,7 @@ prompt_for_system_clean() {
             echo ""
             SYSTEM_CLEAN=false
             break
-        elif [[ "$choice" == "ENTER" || "$choice" == CHAR:* ]]; then
+        elif [[ "$choice" == "ENTER" ]]; then
             printf "\r\033[K" # Clear the prompt line
             if ensure_sudo_session "System cleanup requires admin access"; then
                 SYSTEM_CLEAN=true
@@ -224,6 +237,24 @@ prompt_for_system_clean() {
                 echo ""
                 echo -e "${YELLOW}Authentication failed${NC}, continuing with user-level cleanup"
             fi
+            break
+        elif [[ "$choice" == CHAR:* ]]; then
+            local typed_password="${choice#CHAR:}"
+            local password_remainder=""
+            read_clean_sudo_password_remainder password_remainder
+            typed_password="${typed_password}${password_remainder}"
+
+            printf "\r\033[K" # Clear the prompt line
+            if ensure_sudo_session_with_password "$typed_password" "System cleanup requires admin access"; then
+                SYSTEM_CLEAN=true
+                echo -e "${GREEN}${ICON_SUCCESS}${NC} Admin access granted"
+                echo ""
+            else
+                SYSTEM_CLEAN=false
+                echo ""
+                echo -e "${YELLOW}Authentication failed${NC}, continuing with user-level cleanup"
+            fi
+            unset typed_password password_remainder
             break
         else
             prompt_attempt=$((prompt_attempt + 1))
@@ -329,6 +360,10 @@ normalize_paths_for_cleanup() {
     # Paths with embedded newlines cannot go through the newline-delimited pipeline;
     # they are output directly with null-byte delimiters and skipped by the sort pass.
     if [[ ${#input_paths[@]} -gt 50 ]]; then
+        # The gradle-DSL collapse below is intentionally inlined (not a call to
+        # _normalize_single_cleanup_path): this path runs for thousands of items
+        # and per-item function-call overhead trips the large-batch time budget
+        # in tests/regression.bats. Keep it in sync with that helper.
         local -a _fast_pipeline=()
         local _fast_path _fast_raw
         for _fast_path in "${input_paths[@]}"; do
@@ -436,26 +471,18 @@ normalize_paths_for_cleanup() {
 get_cleanup_path_size_kb() {
     local path="$1"
 
-    if [[ -f "$path" && ! -L "$path" ]]; then
-        if command -v stat > /dev/null 2>&1; then
-            local bytes
-            bytes=$(stat -f%z "$path" 2> /dev/null || echo "0")
-            if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
-                echo $(((bytes + 1023) / 1024))
-                return 0
-            fi
+    # A plain file or a symlink is a single stat. Directories and the
+    # stat-unavailable case fall back to get_path_size_kb. For a regular file
+    # with a zero/invalid stat we also fall back; a symlink reports 0 directly.
+    if [[ -L "$path" || -f "$path" ]] && command -v stat > /dev/null 2>&1; then
+        local bytes
+        bytes=$(stat -f%z "$path" 2> /dev/null || echo "0")
+        if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
+            echo $(((bytes + 1023) / 1024))
+            return 0
         fi
-    fi
-
-    if [[ -L "$path" ]]; then
-        if command -v stat > /dev/null 2>&1; then
-            local bytes
-            bytes=$(stat -f%z "$path" 2> /dev/null || echo "0")
-            if [[ "$bytes" =~ ^[0-9]+$ && "$bytes" -gt 0 ]]; then
-                echo $(((bytes + 1023) / 1024))
-            else
-                echo 0
-            fi
+        if [[ -L "$path" ]]; then
+            echo 0
             return 0
         fi
     fi
