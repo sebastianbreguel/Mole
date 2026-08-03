@@ -2295,6 +2295,84 @@ EOF
     done < "$HOME/simctl-single.log"
 }
 
+@test "clean_dev_mobile measures unavailable simulator directories once in dry-run" {
+    local first_udid="11111111-1111-1111-1111-111111111111"
+    local second_udid="22222222-2222-2222-2222-222222222222"
+    local missing_udid="33333333-3333-3333-3333-333333333333"
+    mkdir -p \
+        "$HOME/Library/Developer/CoreSimulator/Devices/$first_udid" \
+        "$HOME/Library/Developer/CoreSimulator/Devices/$second_udid"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" DRY_RUN=true \
+        FIRST_UDID="$first_udid" SECOND_UDID="$second_udid" MISSING_UDID="$missing_udid" \
+        /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+
+check_android_ndk() { :; }
+clean_xcode_documentation_cache() { :; }
+clean_xcode_system_coresimulator_caches() { :; }
+clean_xcode_simulator_runtime_volumes() { :; }
+clean_xcode_xctest_devices() { :; }
+clean_xcode_device_support() { :; }
+safe_clean() { :; }
+note_activity() { :; }
+debug_log() { :; }
+xcrun() { :; }
+_resolve_simctl_developer_dir() {
+    _MOLE_SIMCTL_RESOLUTION_STATUS="ready"
+    _MOLE_SIMCTL_DEVELOPER_DIR="$HOME/Xcode.app/Contents/Developer"
+}
+_run_simctl() {
+    shift
+    case "$*" in
+        "list devices")
+            return 0
+            ;;
+        "list devices unavailable")
+            printf '    First (%s) (Shutdown) (unavailable)\n' "$FIRST_UDID"
+            printf '    Second (%s) (Shutdown) (unavailable)\n' "$SECOND_UDID"
+            printf '    Missing (%s) (Shutdown) (unavailable)\n' "$MISSING_UDID"
+            return 0
+            ;;
+    esac
+    return 1
+}
+get_path_size_kb() {
+    printf '%s\n' "$1" >> "$HOME/simulator-size-calls"
+    case "$1" in
+        *"/$FIRST_UDID")
+            echo 1024
+            ;;
+        *"/$SECOND_UDID")
+            echo 2048
+            ;;
+        *)
+            echo 0
+            ;;
+    esac
+}
+record_dry_run_cleanup_target() {
+    printf 'RECORD:%s|%s|%s|%s\n' "$1" "$2" "$3" "$4"
+}
+
+clean_dev_mobile
+EOF
+
+    [ "$status" -eq 0 ] || {
+        echo "$output"
+        return 1
+    }
+    [ "$(wc -l < "$HOME/simulator-size-calls" | tr -d ' ')" -eq 2 ] || return 1
+    [ "$(command grep -c "/$first_udid$" "$HOME/simulator-size-calls")" -eq 1 ] || return 1
+    [ "$(command grep -c "/$second_udid$" "$HOME/simulator-size-calls")" -eq 1 ] || return 1
+    [[ "$output" == *"RECORD:$HOME/Library/Developer/CoreSimulator/Devices/$first_udid|1024|1|true"* ]] || return 1
+    [[ "$output" == *"RECORD:$HOME/Library/Developer/CoreSimulator/Devices/$second_udid|2048|1|true"* ]] || return 1
+    [[ "$output" != *"RECORD:"*"$missing_udid"* ]] || return 1
+    [[ "$output" == *"Xcode unavailable simulators · would clean 3, 3.1MB"* ]] || return 1
+}
+
 @test "clean_dev_mobile skips ambiguous Xcode candidates without choosing one (#1261)" {
     local tmp_bin
     tmp_bin="$HOME/simctl-ambiguous-bin"

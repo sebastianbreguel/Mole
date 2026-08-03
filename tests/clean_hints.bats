@@ -58,6 +58,77 @@ EOT1
     [[ "$output" != *"/bin"* ]]
 }
 
+@test "probe_project_artifact_hints preserves target order and nested exclusions" {
+    local root="$HOME/hints-equivalence"
+    mkdir -p \
+        "$root/build" \
+        "$root/proj/node_modules/coverage" \
+        "$root/proj/target" \
+        "$root/proj/.venv" \
+        "$root/proj/vendor" \
+        "$root/proj/bin" \
+        "$root/proj/sub/build" \
+        "$root/proj/sub/coverage" \
+        "$root/proj/.private/dist"
+    ln -s "$root/proj/sub" "$root/proj/linked-sub"
+    ln -s "$root/proj/sub/build" "$root/proj/zig-out"
+    touch "$root/package.json" "$root/proj/package.json"
+    printf '%s\n' "$root" > "$HOME/.config/mole/purge_paths"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOT_EQUIVALENCE'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/hints.sh"
+run_with_timeout() { shift; "$@"; }
+hint_get_path_size_kb_with_timeout() { printf '1\n'; }
+probe_project_artifact_hints
+printf 'count=%s\n' "$PROJECT_ARTIFACT_HINT_COUNT"
+printf 'examples=%s\n' "$(IFS='|'; printf '%s' "${PROJECT_ARTIFACT_HINT_EXAMPLES[*]}")"
+printf 'partial=%s\n' "$PROJECT_ARTIFACT_HINT_ESTIMATE_PARTIAL"
+EOT_EQUIVALENCE
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"count=7"* ]] || return 1
+    [[ "$output" == *"examples=~/hints-equivalence/build|~/hints-equivalence/proj/node_modules"* ]] || return 1
+    [[ "$output" == *"partial=true"* ]] || return 1
+    [[ "$output" != *"/vendor"* ]] || return 1
+    [[ "$output" != *"/bin"* ]] || return 1
+    [[ "$output" != *".private"* ]] || return 1
+}
+
+@test "probe_project_artifact_hints caps large nested fixtures before another listing" {
+    local root="$HOME/hints-large"
+    local index
+    mkdir -p "$root/proj"
+    touch "$root/proj/package.json"
+    for index in $(seq 1 130); do
+        mkdir -p "$root/proj/unit-$index/build"
+    done
+    printf '%s\n' "$root" > "$HOME/.config/mole/purge_paths"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOT_LARGE'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/hints.sh"
+COLLECTION_CALLS=0
+run_with_timeout() {
+    COLLECTION_CALLS=$((COLLECTION_CALLS + 1))
+    shift
+    "$@"
+}
+hint_get_path_size_kb_with_timeout() { printf '1\n'; }
+probe_project_artifact_hints
+printf 'count=%s\n' "$PROJECT_ARTIFACT_HINT_COUNT"
+printf 'collections=%s\n' "$COLLECTION_CALLS"
+printf 'truncated=%s\n' "$PROJECT_ARTIFACT_HINT_TRUNCATED"
+EOT_LARGE
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"count=120"* ]] || return 1
+    [[ "$output" == *"collections=122"* ]] || return 1
+    [[ "$output" == *"truncated=true"* ]] || return 1
+}
+
 @test "show_project_artifact_hint_notice renders sampled summary" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOT2'
 set -euo pipefail

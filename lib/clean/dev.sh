@@ -1935,6 +1935,8 @@ clean_dev_mobile() {
             local unavailable_size_kb=0
             local unavailable_size_human="0B"
             local -a unavailable_udids=()
+            local -a unavailable_paths=()
+            local -a unavailable_path_sizes_kb=()
             local unavailable_udid=""
 
             # Check if simctl is accessible and working; timeout prevents hang when CLT-only.
@@ -2022,7 +2024,12 @@ clean_dev_mobile() {
                     for udid in "${unavailable_udids[@]}"; do
                         local simulator_device_path="$HOME/Library/Developer/CoreSimulator/Devices/$udid"
                         if [[ -d "$simulator_device_path" ]]; then
-                            unavailable_size_kb=$((unavailable_size_kb + $(get_path_size_kb "$simulator_device_path")))
+                            local simulator_device_size_kb
+                            simulator_device_size_kb=$(get_path_size_kb "$simulator_device_path" 2> /dev/null || echo "0")
+                            [[ "$simulator_device_size_kb" =~ ^[0-9]+$ ]] || simulator_device_size_kb=0
+                            unavailable_paths+=("$simulator_device_path")
+                            unavailable_path_sizes_kb+=("$simulator_device_size_kb")
+                            unavailable_size_kb=$((unavailable_size_kb + simulator_device_size_kb))
                         fi
                     done
                 fi
@@ -2030,16 +2037,17 @@ clean_dev_mobile() {
 
                 if [[ "$DRY_RUN" == "true" ]]; then
                     if ((unavailable_before > 0)); then
-                        for unavailable_udid in "${unavailable_udids[@]}"; do
-                            local unavailable_path="$HOME/Library/Developer/CoreSimulator/Devices/$unavailable_udid"
-                            [[ -d "$unavailable_path" ]] || continue
-                            local unavailable_path_size_kb
-                            unavailable_path_size_kb=$(get_path_size_kb "$unavailable_path" 2> /dev/null || echo "0")
-                            [[ "$unavailable_path_size_kb" =~ ^[0-9]+$ ]] || unavailable_path_size_kb=0
-                            if declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
-                                record_dry_run_cleanup_target "$unavailable_path" "$unavailable_path_size_kb" 1 true || true
-                            fi
-                        done
+                        if [[ ${#unavailable_paths[@]} -gt 0 ]]; then
+                            local unavailable_index
+                            for ((unavailable_index = 0; unavailable_index < ${#unavailable_paths[@]}; unavailable_index++)); do
+                                if declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
+                                    record_dry_run_cleanup_target \
+                                        "${unavailable_paths[$unavailable_index]}" \
+                                        "${unavailable_path_sizes_kb[$unavailable_index]}" \
+                                        1 true || true
+                                fi
+                            done
+                        fi
                         echo -e "  ${YELLOW}${ICON_DRY_RUN}${NC} Xcode unavailable simulators · would clean ${unavailable_before}, ${unavailable_size_human}"
                         note_activity
                     else
@@ -2308,6 +2316,7 @@ _plan_versioned_agent_cleanup_targets() {
     local versions_root="$1"
     local keep_previous="$2"
     local active_path="${3:-}"
+    local target_query="${4:-}"
 
     _MOLE_VERSIONED_AGENT_CLEANUP_TARGETS=()
     _MOLE_VERSIONED_AGENT_RETENTION_TARGETS=()
@@ -2318,8 +2327,7 @@ _plan_versioned_agent_cleanup_targets() {
     local -a entry_mtimes=()
     local entry
     while IFS= read -r -d '' entry; do
-        local name
-        name=$(basename "$entry")
+        local name="${entry##*/}"
         [[ "$name" == .* ]] && continue
         [[ ! "$name" =~ ^[0-9] ]] && continue
         entries+=("$entry")
@@ -2330,6 +2338,40 @@ _plan_versioned_agent_cleanup_targets() {
     done < <(command find "$versions_root" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -print0 2> /dev/null)
 
     [[ ${#entries[@]} -le "$keep_previous" ]] && return 0
+
+    # Delete guards only need to know whether one exact target is still stale.
+    # Compute its stable rank directly instead of sorting every version again.
+    if [[ -n "$target_query" ]]; then
+        local target_idx=-1
+        local target_mtime=0
+        local i
+        for ((i = 0; i < ${#entries[@]}; i++)); do
+            if [[ "${entries[$i]}" == "$target_query" ]]; then
+                target_idx=$i
+                target_mtime="${entry_mtimes[$i]}"
+                break
+            fi
+        done
+
+        [[ $target_idx -ge 0 ]] || return 0
+        [[ -z "$active_path" || "$target_query" != "$active_path" ]] || return 0
+
+        local target_rank=0
+        for ((i = 0; i < ${#entries[@]}; i++)); do
+            [[ "${entries[$i]}" == "$active_path" ]] && continue
+            if [[ ${entry_mtimes[$i]} -gt $target_mtime || \
+                (${entry_mtimes[$i]} -eq $target_mtime && $i -lt $target_idx) ]]; then
+                target_rank=$((target_rank + 1))
+            fi
+        done
+
+        [[ $target_rank -ge $keep_previous ]] || return 0
+        _MOLE_VERSIONED_AGENT_RETENTION_TARGETS+=("$target_query")
+        if _dev_cleanup_targets_exist "$target_query"; then
+            _MOLE_VERSIONED_AGENT_CLEANUP_TARGETS+=("$target_query")
+        fi
+        return 0
+    fi
 
     # Sort the parallel arrays by mtime without serializing pathnames through
     # newline-delimited text. Version directories can legally contain newlines.
@@ -2443,7 +2485,8 @@ _versioned_agent_delete_guard_allows() {
     _plan_versioned_agent_cleanup_targets \
         "$_MOLE_VERSIONED_AGENT_GUARD_ROOT" \
         "$_MOLE_VERSIONED_AGENT_GUARD_KEEP" \
-        "$active_path"
+        "$active_path" \
+        "$target"
 
     if [[ -n "$_MOLE_VERSIONED_AGENT_GUARD_ACTIVE_SYMLINK" ]]; then
         local verified_active_path=""

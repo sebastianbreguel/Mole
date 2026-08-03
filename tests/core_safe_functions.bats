@@ -419,6 +419,46 @@ SCRIPT
 }
 
 
+@test "safe_find_delete dry-run sizes and records each target once" {
+    local target_dir="$TEST_DIR/find-dry-run-once"
+    local target_file="$target_dir/old.tmp"
+    mkdir -p "$target_dir"
+    touch "$target_file"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TARGET_DIR="$target_dir" \
+        TARGET_FILE="$target_file" /bin/bash --noprofile --norc <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+SIZE_TRACE="${TARGET_DIR}.size.trace"
+LEDGER_TRACE="${TARGET_DIR}.ledger.trace"
+: > "$SIZE_TRACE"
+: > "$LEDGER_TRACE"
+
+should_protect_path() { return 1; }
+is_path_whitelisted() { return 1; }
+holds_compiled_model_cache() { return 1; }
+get_path_size_kb() {
+    printf 'size\n' >> "$SIZE_TRACE"
+    printf '7\n'
+}
+record_dry_run_cleanup_target() {
+    printf '%s|%s|%s\n' "$1" "$2" "$4" >> "$LEDGER_TRACE"
+}
+
+MOLE_DRY_RUN=1
+safe_find_delete "$TARGET_DIR" "*.tmp" "0" "f"
+printf 'SIZE_CALLS=%s\n' "$(wc -l < "$SIZE_TRACE" | tr -d ' ')"
+printf 'LEDGER_CALLS=%s\n' "$(wc -l < "$LEDGER_TRACE" | tr -d ' ')"
+cat "$LEDGER_TRACE"
+SCRIPT
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"SIZE_CALLS=1"* ]] || return 1
+    [[ "$output" == *"LEDGER_CALLS=1"* ]] || return 1
+    [[ "$output" == *"$target_file|7|true"* ]] || return 1
+    [ -e "$target_file" ] || return 1
+}
+
 @test "safe_find_delete validates base directory" {
     run /bin/bash -c "source '$PROJECT_ROOT/lib/core/common.sh'; safe_find_delete '/nonexistent' '*.tmp' 7 'f' 2>&1"
     [ "$status" -eq 1 ]
@@ -588,6 +628,128 @@ SCRIPT
     [[ "$output" == *"RC=13"* ]]
 }
 
+@test "safe_sudo_find_delete dry-run sizes and records each target once" {
+    local target_dir="$TEST_DIR/sudo-find-dry-run-once"
+    local target_file="$target_dir/old.log"
+    mkdir -p "$target_dir"
+    touch "$target_file"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TARGET_DIR="$target_dir" \
+        TARGET_FILE="$target_file" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 \
+        /bin/bash --noprofile --norc <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+SIZE_TRACE="${TARGET_DIR}.size.trace"
+LEDGER_TRACE="${TARGET_DIR}.ledger.trace"
+: > "$SIZE_TRACE"
+: > "$LEDGER_TRACE"
+
+should_protect_path() { return 1; }
+is_path_whitelisted() { return 1; }
+holds_compiled_model_cache() { return 1; }
+_mole_privileged_path_has_mutable_ancestor() { return 1; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+record_dry_run_cleanup_target() {
+    printf '%s|%s|%s\n' "$1" "$2" "$4" >> "$LEDGER_TRACE"
+}
+sudo() {
+    [[ "${1:-}" == "-n" ]] && shift
+    case "${1:-}" in
+        test)
+            shift
+            command test "$@"
+            ;;
+        find)
+            printf '%s\0' "$TARGET_FILE"
+            ;;
+        du)
+            printf 'size\n' >> "$SIZE_TRACE"
+            printf '9\t%s\n' "$TARGET_FILE"
+            ;;
+        *)
+            return 99
+            ;;
+    esac
+}
+
+MOLE_DRY_RUN=1
+safe_sudo_find_delete "$TARGET_DIR" "*.log" "0" "f"
+printf 'SIZE_CALLS=%s\n' "$(wc -l < "$SIZE_TRACE" | tr -d ' ')"
+printf 'LEDGER_CALLS=%s\n' "$(wc -l < "$LEDGER_TRACE" | tr -d ' ')"
+cat "$LEDGER_TRACE"
+SCRIPT
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"SIZE_CALLS=1"* ]] || return 1
+    [[ "$output" == *"LEDGER_CALLS=1"* ]] || return 1
+    [[ "$output" == *"$target_file|9|true"* ]] || return 1
+    [ -e "$target_file" ] || return 1
+}
+
+@test "safe_sudo_find_delete preserves unknown dry-run size without retrying" {
+    local target_dir="$TEST_DIR/sudo-find-dry-run-unknown"
+    local target_file="$target_dir/old.log"
+    mkdir -p "$target_dir"
+    touch "$target_file"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" TARGET_DIR="$target_dir" \
+        TARGET_FILE="$target_file" MOLE_TEST_MODE=0 MOLE_TEST_NO_AUTH=0 \
+        /bin/bash --noprofile --norc <<'SCRIPT'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+SIZE_TRACE="${TARGET_DIR}.size.trace"
+LEDGER_TRACE="${TARGET_DIR}.ledger.trace"
+: > "$SIZE_TRACE"
+: > "$LEDGER_TRACE"
+
+should_protect_path() { return 1; }
+is_path_whitelisted() { return 1; }
+holds_compiled_model_cache() { return 1; }
+_mole_privileged_path_has_mutable_ancestor() { return 1; }
+run_with_timeout() {
+    shift
+    "$@"
+}
+record_dry_run_cleanup_target() {
+    printf '%s|%s|%s\n' "$1" "$2" "$4" >> "$LEDGER_TRACE"
+}
+sudo() {
+    [[ "${1:-}" == "-n" ]] && shift
+    case "${1:-}" in
+        test)
+            shift
+            command test "$@"
+            ;;
+        find)
+            printf '%s\0' "$TARGET_FILE"
+            ;;
+        du)
+            printf 'size\n' >> "$SIZE_TRACE"
+            return 1
+            ;;
+        *)
+            return 99
+            ;;
+    esac
+}
+
+MOLE_DRY_RUN=1
+safe_sudo_find_delete "$TARGET_DIR" "*.log" "0" "f"
+printf 'SIZE_CALLS=%s\n' "$(wc -l < "$SIZE_TRACE" | tr -d ' ')"
+printf 'LEDGER_CALLS=%s\n' "$(wc -l < "$LEDGER_TRACE" | tr -d ' ')"
+cat "$LEDGER_TRACE"
+SCRIPT
+
+    [ "$status" -eq 0 ] || return 1
+    [[ "$output" == *"SIZE_CALLS=1"* ]] || return 1
+    [[ "$output" == *"LEDGER_CALLS=1"* ]] || return 1
+    [[ "$output" == *"$target_file|0|false"* ]] || return 1
+    [ -e "$target_file" ] || return 1
+}
+
 @test "safe_sudo_find_delete never opens an interactive sudo prompt" {
     local target_dir="$TEST_DIR/sudo-find-target"
     local script="$TEST_DIR/sudo-find-delete-test.sh"
@@ -664,7 +826,13 @@ should_protect_path() { return 1; }
 is_path_whitelisted() { return 1; }
 _mole_privileged_path_has_mutable_ancestor() { return 1; }
 record_dry_run_cleanup_target() { printf 'PREVIEW:%s\n' "$1"; }
-safe_sudo_remove() { printf 'REMOVE:%s\n' "$1"; }
+safe_sudo_remove() {
+    if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
+        record_dry_run_cleanup_target "$1"
+    else
+        printf 'REMOVE:%s\n' "$1"
+    fi
+}
 
 sudo() {
     [[ "${1:-}" == "-n" ]] && shift

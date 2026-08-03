@@ -400,12 +400,15 @@ validate_path_for_deletion() {
 _record_file_ops_dry_run_target() {
     local path="$1"
     local precomputed_size_kb="${2:-}"
+    local precomputed_size_known="${3:-}"
 
     declare -f record_dry_run_cleanup_target > /dev/null 2>&1 || return 0
 
     local size_kb=0
     local size_known=true
-    if [[ -n "$precomputed_size_kb" && "$precomputed_size_kb" =~ ^[0-9]+$ ]]; then
+    if [[ "$precomputed_size_known" == "false" ]]; then
+        size_known=false
+    elif [[ -n "$precomputed_size_kb" && "$precomputed_size_kb" =~ ^[0-9]+$ ]]; then
         size_kb="$precomputed_size_kb"
     else
         local measured_size=""
@@ -657,6 +660,7 @@ _mole_privileged_path_has_mutable_ancestor() {
 safe_sudo_remove() {
     local path="$1"
     local precomputed_size_kb="${2:-}"
+    local precomputed_size_known="${3:-}"
 
     if ! validate_path_for_deletion "$path"; then
         if declare -f should_protect_path > /dev/null 2>&1 && should_protect_path "$path"; then
@@ -702,7 +706,7 @@ safe_sudo_remove() {
     fi
 
     if [[ "${MOLE_DRY_RUN:-0}" == "1" ]]; then
-        _record_file_ops_dry_run_target "$path" "$precomputed_size_kb"
+        _record_file_ops_dry_run_target "$path" "$precomputed_size_kb" "$precomputed_size_known"
     fi
 
     if [[ "${MOLE_TEST_MODE:-0}" == "1" || "${MOLE_TEST_NO_AUTH:-0}" == "1" ]]; then
@@ -1588,13 +1592,12 @@ safe_find_delete() {
         if declare -f is_path_whitelisted > /dev/null && is_path_whitelisted "$match"; then
             continue
         fi
+        local match_size_kb=""
         if [[ "${MOLE_DRY_RUN:-0}" == "1" ]] && declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
-            local match_size_kb
             match_size_kb=$(get_path_size_kb "$match" 2> /dev/null || echo "0")
             [[ "$match_size_kb" =~ ^[0-9]+$ ]] || match_size_kb=0
-            record_dry_run_cleanup_target "$match" "$match_size_kb" 1 true || continue
         fi
-        safe_remove "$match" true || true
+        safe_remove "$match" true "$match_size_kb" || true
     done < <(command find "$base_dir" "${find_args[@]}" -print0 2> /dev/null < /dev/null || true)
 
     return 0
@@ -1708,9 +1711,11 @@ safe_sudo_find_delete() {
             fi
             continue
         fi
+        local match_size_kb=""
+        local match_size_known=""
         if [[ "${MOLE_DRY_RUN:-0}" == "1" ]] && declare -f record_dry_run_cleanup_target > /dev/null 2>&1; then
-            local match_size_kb=0
-            local match_size_known=false
+            match_size_kb=0
+            match_size_known=false
             local raw_match_size=""
             if raw_match_size=$(run_with_timeout "$MOLE_TIMEOUT_DISK_VERIFY_SEC" sudo -n du -skP "$match" 2> /dev/null | awk '{print $1; exit}'); then
                 if [[ "$raw_match_size" =~ ^[0-9]+$ ]]; then
@@ -1718,7 +1723,6 @@ safe_sudo_find_delete() {
                     match_size_known=true
                 fi
             fi
-            record_dry_run_cleanup_target "$match" "$match_size_kb" 1 "$match_size_known" || continue
         fi
         # -type f never emits symlinks; a path that is one now was swapped
         # after find saw it, and the single-file path refuses those.
@@ -1726,7 +1730,7 @@ safe_sudo_find_delete() {
             batch_files+=("$match")
             continue
         fi
-        safe_sudo_remove "$match" || true
+        safe_sudo_remove "$match" "$match_size_kb" "$match_size_known" || true
     done < <(sudo -n find "$base_dir" "${find_args[@]}" -print0 2> /dev/null || true)
 
     if [[ ${#batch_files[@]} -gt 0 ]]; then

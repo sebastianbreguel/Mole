@@ -704,6 +704,93 @@ EOF
     assert_output_not_contains "WRONG_PLANNED_KEEP"
 }
 
+@test "versioned agent target query matches full retention planning" {
+    local root="$HOME/agent-target-query-parity"
+    local newline_version=$'6.0\njunk'
+    mkdir -p "$root/1.0" "$root/2.0" "$root/3.0" "$root/4.0" "$root/5.0" \
+        "$root/$newline_version" "$root/.hidden" "$root/not-a-version"
+    touch -t 202604010000 "$root/1.0" "$root/2.0"
+    touch -t 202604100000 "$root/3.0"
+    touch -t 202604200000 "$root/4.0"
+    touch -t 202604300000 "$root/$newline_version"
+
+    run env HOME="$HOME" ROOT="$root" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+newline_version=$'6.0\njunk'
+_dev_cleanup_targets_exist() { [[ -e "$1" ]]; }
+stat() {
+    local stat_path="${!#}"
+    [[ "$stat_path" != "$ROOT/5.0" ]] || return 1
+    command stat "$@"
+}
+candidates=(
+    "$ROOT/1.0" "$ROOT/2.0" "$ROOT/3.0" "$ROOT/4.0"
+    "$ROOT/5.0" "$ROOT/$newline_version" "$ROOT/.hidden" "$ROOT/not-a-version"
+)
+for keep in 0 1 2 8; do
+    for active in "" "$ROOT/1.0" "$ROOT/3.0" "$ROOT/$newline_version"; do
+        _plan_versioned_agent_cleanup_targets "$ROOT" "$keep" "$active"
+        expected=()
+        if [[ ${#_MOLE_VERSIONED_AGENT_CLEANUP_TARGETS[@]} -gt 0 ]]; then
+            expected=("${_MOLE_VERSIONED_AGENT_CLEANUP_TARGETS[@]}")
+        fi
+        for candidate in "${candidates[@]}"; do
+            expected_match=false
+            if [[ ${#expected[@]} -gt 0 ]]; then
+                for planned in "${expected[@]}"; do
+                    if [[ "$planned" == "$candidate" ]]; then
+                        expected_match=true
+                        break
+                    fi
+                done
+            fi
+            _plan_versioned_agent_cleanup_targets "$ROOT" "$keep" "$active" "$candidate"
+            actual_match=false
+            if [[ ${#_MOLE_VERSIONED_AGENT_CLEANUP_TARGETS[@]} -gt 0 ]]; then
+                [[ ${#_MOLE_VERSIONED_AGENT_CLEANUP_TARGETS[@]} -eq 1 ]] || exit 1
+                [[ "${_MOLE_VERSIONED_AGENT_CLEANUP_TARGETS[0]}" == "$candidate" ]] || exit 1
+                actual_match=true
+            fi
+            if [[ "$actual_match" != "$expected_match" ]]; then
+                printf 'MISMATCH:%s|%s|%q\n' "$keep" "$active" "$candidate"
+                exit 1
+            fi
+        done
+    done
+done
+echo "QUERY_PARITY_OK"
+EOF
+
+    assert_run_success
+    assert_output_contains "QUERY_PARITY_OK"
+    assert_output_not_contains "MISMATCH:"
+}
+
+@test "versioned agent guard requests an exact-target plan" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+target="$HOME/versions/1.0"
+_plan_versioned_agent_cleanup_targets() {
+    printf 'PLAN:%s|%s\n' "$#" "${4:-}"
+    _MOLE_VERSIONED_AGENT_RETENTION_TARGETS=("$4")
+    _MOLE_VERSIONED_AGENT_CLEANUP_TARGETS=("$4")
+}
+_MOLE_VERSIONED_AGENT_GUARD_ROOT="$HOME/versions"
+_MOLE_VERSIONED_AGENT_GUARD_ACTIVE_SYMLINK=""
+_MOLE_VERSIONED_AGENT_GUARD_ACTIVE_REQUIRED=false
+_MOLE_VERSIONED_AGENT_GUARD_KEEP=1
+_MOLE_VERSIONED_AGENT_GUARD_REASON=""
+_versioned_agent_delete_guard_allows "$target"
+EOF
+
+    assert_run_success
+    assert_output_contains "PLAN:4|$HOME/versions/1.0"
+}
+
 @test "versioned agent cleanup rechecks the active symlink after sizing" {
     local isolated_home="$HOME/agent-active-symlink-race"
     local versions_root="$isolated_home/.local/share/claude/versions"
@@ -767,6 +854,34 @@ EOF
     assert_run_success
     assert_output_not_contains "UNEXPECTED_DELETE"
     assert_output_contains "Claude Code old version · stopped (active version changed)"
+}
+
+@test "versioned agent cleanup rechecks target mtime after sizing" {
+    local isolated_home="$HOME/agent-target-mtime-race"
+    local versions_root="$isolated_home/.local/share/claude/versions"
+    local bin_dir="$isolated_home/.local/bin"
+    mkdir -p "$versions_root/1.0" "$versions_root/2.0" "$versions_root/3.0" "$bin_dir"
+    touch "$versions_root/1.0/claude" "$versions_root/2.0/claude" "$versions_root/3.0/claude"
+    touch -t 202604010000 "$versions_root/1.0"
+    touch -t 202604100000 "$versions_root/2.0"
+    touch -t 202604200000 "$versions_root/3.0"
+    ln -s "$versions_root/3.0/claude" "$bin_dir/claude"
+
+    run env HOME="$isolated_home" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/bin/clean.sh"
+get_cleanup_path_size_kb() {
+    touch -t 202605010000 "$1"
+    echo 1
+}
+safe_remove() { echo "UNEXPECTED_DELETE:$1"; return 0; }
+clean_dev_ai_agents
+[[ -d "$HOME/.local/share/claude/versions/1.0" ]] || exit 1
+EOF
+
+    assert_run_success
+    assert_output_not_contains "UNEXPECTED_DELETE"
+    assert_output_contains "Claude Code old version · stopped (retention changed)"
 }
 
 @test "Claude Desktop bundled cleanup rechecks activity after sizing" {

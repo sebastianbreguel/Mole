@@ -65,8 +65,10 @@ hint_collect_child_dirs_with_timeout() {
 
     # 1s: shallow directory listing should be near-instant on healthy local
     # paths. Slow/cloud-backed roots are skipped so `mo clean` never appears
-    # stuck while rendering this non-destructive hint.
-    run_with_timeout "$timeout_seconds" find "$parent" -mindepth 1 -maxdepth 1 -type d -print0 > "$output_file" 2> /dev/null
+    # stuck while rendering this non-destructive hint. Include symlinks so exact
+    # target-name matches preserve the previous [[ -d ]] behavior; callers keep
+    # symlinks out of project traversal.
+    run_with_timeout "$timeout_seconds" find "$parent" -mindepth 1 -maxdepth 1 \( -type d -o -type l \) -print0 > "$output_file" 2> /dev/null
 }
 
 # shellcheck disable=SC2329
@@ -192,6 +194,52 @@ is_quick_purge_project_root() {
 }
 
 # shellcheck disable=SC2329
+record_project_artifact_hints_from_child_listing() {
+    local dirs_file="$1"
+    local target_name_lookup="$2"
+    local scan_deadline="$3"
+    local -a matching_paths=()
+    local child_dir child_name target_name matched_path
+    local target_index
+
+    # The caller's target_names array defines the existing display order.
+    # Scan the directory listing once, then replay only matches in that order.
+    while IFS= read -r -d '' child_dir; do
+        [[ $SECONDS -lt $scan_deadline ]] || return 124
+
+        child_name="${child_dir##*/}"
+        case "$target_name_lookup" in
+            *$'\n'"$child_name"$'\n'*)
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        [[ -d "$child_dir" ]] || continue
+
+        target_index=0
+        for target_name in "${target_names[@]}"; do
+            if [[ "$child_name" == "$target_name" ]]; then
+                matching_paths[$target_index]="$child_dir"
+                break
+            fi
+            target_index=$((target_index + 1))
+        done
+    done < "$dirs_file"
+
+    target_index=0
+    for target_name in "${target_names[@]}"; do
+        [[ $SECONDS -lt $scan_deadline ]] || return 124
+        matched_path="${matching_paths[$target_index]:-}"
+        if [[ -n "$matched_path" ]]; then
+            record_project_artifact_hint "$matched_path"
+        fi
+        target_index=$((target_index + 1))
+    done
+
+    return 0
+}
+
 probe_project_artifact_hints() {
     PROJECT_ARTIFACT_HINT_DETECTED=false
     PROJECT_ARTIFACT_HINT_COUNT=0
@@ -217,8 +265,12 @@ probe_project_artifact_hints() {
     local scan_deadline=$((SECONDS + hint_budget_seconds))
 
     local -a target_names=()
+    local target_name_lookup=$'\n'
     while IFS= read -r target_name; do
-        [[ -n "$target_name" ]] && target_names+=("$target_name")
+        if [[ -n "$target_name" ]]; then
+            target_names+=("$target_name")
+            target_name_lookup="${target_name_lookup}${target_name}"$'\n'
+        fi
     done < <(mole_purge_quick_hint_target_names)
 
     local -a scan_roots=()
@@ -237,8 +289,9 @@ probe_project_artifact_hints() {
 
     local scanned_projects=0
     local stop_scan=false
-    local root project_dir nested_dir target_name candidate
+    local root project_dir nested_dir
     local project_dirs_file nested_dirs_file
+    local root_is_project
 
     for root in "${scan_roots[@]}"; do
         if [[ $SECONDS -ge $scan_deadline ]]; then
@@ -248,8 +301,10 @@ probe_project_artifact_hints() {
         fi
         [[ -d "$root" ]] || continue
         local root_projects_scanned=0
+        root_is_project=false
 
         if is_quick_purge_project_root "$root"; then
+            root_is_project=true
             scanned_projects=$((scanned_projects + 1))
             root_projects_scanned=$((root_projects_scanned + 1))
             if [[ $scanned_projects -gt $max_projects ]]; then
@@ -257,13 +312,6 @@ probe_project_artifact_hints() {
                 stop_scan=true
                 break
             fi
-
-            for target_name in "${target_names[@]}"; do
-                candidate="$root/$target_name"
-                if [[ -d "$candidate" ]]; then
-                    record_project_artifact_hint "$candidate"
-                fi
-            done
         fi
         [[ "$stop_scan" == "true" ]] && break
 
@@ -284,95 +332,126 @@ probe_project_artifact_hints() {
             continue
         fi
 
-        while IFS= read -r -d '' project_dir; do
-            if [[ $SECONDS -ge $scan_deadline ]]; then
+        if [[ "$root_is_project" == "true" ]]; then
+            if ! record_project_artifact_hints_from_child_listing \
+                "$project_dirs_file" "$target_name_lookup" "$scan_deadline"; then
                 PROJECT_ARTIFACT_HINT_TRUNCATED=true
                 PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
                 stop_scan=true
-                break
             fi
-            [[ -d "$project_dir" ]] || continue
+        fi
 
-            local project_name
-            project_name=$(basename "$project_dir")
-            [[ "$project_name" == .* ]] && continue
-
-            if [[ $root_projects_scanned -ge $max_projects_per_root ]]; then
-                PROJECT_ARTIFACT_HINT_TRUNCATED=true
-                break
-            fi
-
-            scanned_projects=$((scanned_projects + 1))
-            root_projects_scanned=$((root_projects_scanned + 1))
-            if [[ $scanned_projects -gt $max_projects ]]; then
-                PROJECT_ARTIFACT_HINT_TRUNCATED=true
-                stop_scan=true
-                break
-            fi
-
-            for target_name in "${target_names[@]}"; do
-                candidate="$project_dir/$target_name"
-                if [[ -d "$candidate" ]]; then
-                    record_project_artifact_hint "$candidate"
-                fi
-            done
-            [[ "$stop_scan" == "true" ]] && break
-
-            if [[ $SECONDS -ge $scan_deadline ]]; then
-                PROJECT_ARTIFACT_HINT_TRUNCATED=true
-                PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
-                stop_scan=true
-                break
-            fi
-
-            local nested_count=0
-            nested_dirs_file=$(mktemp_file "project_artifact_nested") || {
-                PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
-                PROJECT_ARTIFACT_HINT_TRUNCATED=true
-                continue
-            }
-            if ! hint_collect_child_dirs_with_timeout "$project_dir" "$nested_dirs_file" "$list_timeout_seconds"; then
-                PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
-                PROJECT_ARTIFACT_HINT_TRUNCATED=true
-                rm -f "$nested_dirs_file"
-                continue
-            fi
-
-            while IFS= read -r -d '' nested_dir; do
+        if [[ "$stop_scan" != "true" ]]; then
+            while IFS= read -r -d '' project_dir; do
                 if [[ $SECONDS -ge $scan_deadline ]]; then
                     PROJECT_ARTIFACT_HINT_TRUNCATED=true
                     PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
                     stop_scan=true
                     break
                 fi
-                [[ -d "$nested_dir" ]] || continue
+                [[ -d "$project_dir" ]] || continue
+                [[ -L "$project_dir" ]] && continue
 
-                local nested_name
-                nested_name=$(basename "$nested_dir")
-                [[ "$nested_name" == .* ]] && continue
+                local project_name
+                project_name="${project_dir##*/}"
+                [[ "$project_name" == .* ]] && continue
 
-                case "$nested_name" in
-                    node_modules | target | build | dist | DerivedData | Pods)
-                        continue
-                        ;;
-                esac
-
-                nested_count=$((nested_count + 1))
-                if [[ $nested_count -gt $max_nested_per_project ]]; then
+                if [[ $root_projects_scanned -ge $max_projects_per_root ]]; then
+                    PROJECT_ARTIFACT_HINT_TRUNCATED=true
                     break
                 fi
 
-                for target_name in "${target_names[@]}"; do
-                    candidate="$nested_dir/$target_name"
-                    if [[ -d "$candidate" ]]; then
-                        record_project_artifact_hint "$candidate"
-                    fi
-                done
-            done < "$nested_dirs_file"
-            rm -f "$nested_dirs_file"
+                scanned_projects=$((scanned_projects + 1))
+                root_projects_scanned=$((root_projects_scanned + 1))
+                if [[ $scanned_projects -gt $max_projects ]]; then
+                    PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                    stop_scan=true
+                    break
+                fi
 
-            [[ "$stop_scan" == "true" ]] && break
-        done < "$project_dirs_file"
+                if [[ $SECONDS -ge $scan_deadline ]]; then
+                    PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                    PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                    stop_scan=true
+                    break
+                fi
+
+                local nested_count=0
+                nested_dirs_file=$(mktemp_file "project_artifact_nested") || {
+                    PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                    PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                    continue
+                }
+                if ! hint_collect_child_dirs_with_timeout "$project_dir" "$nested_dirs_file" "$list_timeout_seconds"; then
+                    PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                    PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                    rm -f "$nested_dirs_file"
+                    continue
+                fi
+
+                if ! record_project_artifact_hints_from_child_listing \
+                    "$nested_dirs_file" "$target_name_lookup" "$scan_deadline"; then
+                    PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                    PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                    stop_scan=true
+                fi
+
+                if [[ "$stop_scan" != "true" ]]; then
+                    while IFS= read -r -d '' nested_dir; do
+                        if [[ $SECONDS -ge $scan_deadline ]]; then
+                            PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                            PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                            stop_scan=true
+                            break
+                        fi
+                        [[ -d "$nested_dir" ]] || continue
+                        [[ -L "$nested_dir" ]] && continue
+
+                        local nested_name
+                        nested_name="${nested_dir##*/}"
+                        [[ "$nested_name" == .* ]] && continue
+
+                        case "$nested_name" in
+                            node_modules | target | build | dist | DerivedData | Pods)
+                                continue
+                                ;;
+                        esac
+
+                        nested_count=$((nested_count + 1))
+                        if [[ $nested_count -gt $max_nested_per_project ]]; then
+                            break
+                        fi
+
+                        local artifact_dirs_file
+                        artifact_dirs_file=$(mktemp_file "project_artifact_children") || {
+                            PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                            PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                            continue
+                        }
+                        if ! hint_collect_child_dirs_with_timeout \
+                            "$nested_dir" "$artifact_dirs_file" "$list_timeout_seconds"; then
+                            PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                            PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                            rm -f "$artifact_dirs_file"
+                            continue
+                        fi
+
+                        if ! record_project_artifact_hints_from_child_listing \
+                            "$artifact_dirs_file" "$target_name_lookup" "$scan_deadline"; then
+                            PROJECT_ARTIFACT_HINT_TRUNCATED=true
+                            PROJECT_ARTIFACT_HINT_SCAN_SKIPPED=true
+                            stop_scan=true
+                        fi
+                        rm -f "$artifact_dirs_file"
+
+                        [[ "$stop_scan" == "true" ]] && break
+                    done < "$nested_dirs_file"
+                fi
+                rm -f "$nested_dirs_file"
+
+                [[ "$stop_scan" == "true" ]] && break
+            done < "$project_dirs_file"
+        fi
         rm -f "$project_dirs_file"
 
         [[ "$stop_scan" == "true" ]] && break
