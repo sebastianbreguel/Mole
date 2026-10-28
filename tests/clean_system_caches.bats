@@ -513,6 +513,85 @@ EOF
 	rm -rf "$HOME/Projects"
 }
 
+@test "clean_project_caches collects a scan started ahead of Developer tools" {
+    mkdir -p "$HOME/Projects/python-app/pkg/__pycache__"
+    touch "$HOME/Projects/python-app/pyproject.toml"
+    touch "$HOME/Projects/python-app/pkg/__pycache__/module.pyc"
+
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+DRY_RUN=true
+discover_project_cache_roots() {
+    echo DISCOVER >> "$HOME/discover.trace"
+    printf '%s\n' "$HOME/Projects"
+}
+: > "$HOME/discover.trace"
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+[[ -n "$prefetch_pid" ]] || exit 1
+# Earlier sections run meanwhile; here the scan simply finishes first.
+while kill -0 "$prefetch_pid" 2> /dev/null; do sleep 0.05; done
+clean_project_caches
+discoveries=$(grep -c DISCOVER "$HOME/discover.trace")
+[[ "$discoveries" == 1 ]] || { echo "DISCOVERIES:$discoveries"; exit 1; }
+[[ -z "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]] || exit 1
+echo COLLECTED
+EOF
+    rm -rf "$HOME/Projects" "$HOME/discover.trace"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *COLLECTED* ]] || return 1
+    [[ "$output" == *"Python bytecode cache · python-app"* ]] || return 1
+}
+
+@test "stop_project_cache_prefetch stops an uncollected scan and its workers" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME"; }
+project_cache_root_is_walkable() { return 0; }
+scan_project_cache_root() {
+    sh -c 'echo $PPID' > "$HOME/worker.pid"
+    while :; do sleep 0.1; done
+}
+rm -f "$HOME/worker.pid"
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" ]] && break
+    sleep 0.05
+done
+worker_pid=$(cat "$HOME/worker.pid")
+[[ -n "$worker_pid" ]] || exit 1
+stop_project_cache_prefetch
+sleep 0.3
+if kill -0 "$prefetch_pid" 2> /dev/null; then echo "PREFETCH_ALIVE"; exit 1; fi
+if kill -0 "$worker_pid" 2> /dev/null; then echo "WORKER_ALIVE"; kill "$worker_pid"; exit 1; fi
+[[ ! -e "$scan_manifest" ]] || { echo "MANIFEST_LEFT"; exit 1; }
+[[ -z "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]] || exit 1
+echo STOPPED
+EOF
+    rm -f "$HOME/worker.pid"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *STOPPED* ]] || return 1
+}
+
+@test "mo clean starts the project cache scan before its first section and stops it on exit" {
+    local clean_source="$PROJECT_ROOT/bin/clean.sh"
+    local code
+    code=$(grep -vE '^[[:space:]]*#' "$clean_source")
+    local start_line first_section_line
+    start_line=$(grep -n 'start_project_cache_prefetch$' <<< "$code" | head -1 | cut -d: -f1)
+    first_section_line=$(grep -n 'start_section "System"' <<< "$code" | head -1 | cut -d: -f1)
+    [[ -n "$start_line" && -n "$first_section_line" ]] || return 1
+    [ "$start_line" -lt "$first_section_line" ] || return 1
+    # Both the end of the section run and the exit trap stop an uncollected scan.
+    [ "$(grep -c 'stop_project_cache_prefetch' <<< "$code")" -ge 2 ] || return 1
+}
+
 @test "clean_python_bytecode_cache_group reuses its exact size at removal" {
 	local cache_dir="$HOME/Projects/python-app/pkg/__pycache__"
 	mkdir -p "$cache_dir"

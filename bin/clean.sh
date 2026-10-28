@@ -632,6 +632,9 @@ cleanup() {
 
     stop_inline_spinner 2> /dev/null || true
 
+    # Background scan workers ignore SIGINT, so Ctrl-C alone leaves them running.
+    stop_project_cache_prefetch 2> /dev/null || true
+
     cleanup_temp_files
 
     stop_sudo_session
@@ -1749,6 +1752,8 @@ perform_cleanup() {
                 clean_external_volume_target "$EXTERNAL_VOLUME_TARGET" || return $?
             end_section
         else
+            start_project_cache_prefetch
+
             # ===== 1. System =====
             if [[ "$SYSTEM_CLEAN" == "true" ]]; then
                 start_section "System"
@@ -1860,6 +1865,8 @@ perform_cleanup() {
         fi
     }
     run_clean_sections || cleanup_cancel_rc=$?
+    # A cancelled run never reached Developer tools to collect the scan.
+    stop_project_cache_prefetch
 
     # ===== Final summary =====
     flush_idle_section_slot

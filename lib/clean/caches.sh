@@ -1026,6 +1026,85 @@ clean_project_caches() {
         start_inline_spinner "Searching project caches..."
     fi
 
+    local scan_manifest="" scan_rc=0
+    if [[ -n "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]]; then
+        local prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID" finished_pid=""
+        scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
+        mole_wait_for_any_worker finished_pid "$prefetch_pid" || scan_rc=$?
+        if [[ -z "$finished_pid" ]]; then
+            # The poll itself was interrupted; the scan is still running.
+            stop_project_cache_prefetch
+            if [[ -t 1 ]]; then
+                stop_inline_spinner
+            fi
+            return "$scan_rc"
+        fi
+        _MOLE_PROJECT_CACHE_PREFETCH_PID=""
+        _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
+    elif scan_manifest=$(create_temp_file); then
+        scan_project_cache_roots "$scan_manifest" || scan_rc=$?
+    else
+        scan_manifest=""
+    fi
+
+    if [[ -t 1 ]]; then
+        stop_inline_spinner
+    fi
+
+    # Only a signal from the scan cancels; processing keeps its own status.
+    local collect_rc=0
+    if [[ $scan_rc -ge 128 ]]; then
+        collect_rc=$scan_rc
+    elif [[ -s "$scan_manifest" ]]; then
+        collect_project_cache_scans "$scan_manifest" || collect_rc=$?
+    fi
+    if [[ -n "$scan_manifest" ]]; then
+        rm -f "$scan_manifest" # SAFE: exact scratch file created by create_temp_file
+    fi
+    return "$collect_rc"
+}
+
+# Project-cache scans only read project roots, and no clean section before
+# Developer tools writes there, so perform_cleanup starts them before the
+# first section and clean_project_caches collects the result. On a large
+# projects folder the scan is the slowest part of Developer tools, and every
+# match is still rechecked at the final sink.
+_MOLE_PROJECT_CACHE_PREFETCH_PID=""
+_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
+
+start_project_cache_prefetch() {
+    [[ -z "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]] || return 0
+    local scan_manifest
+    scan_manifest=$(create_temp_file) || return 0
+    scan_project_cache_roots "$scan_manifest" < /dev/null > /dev/null 2>&1 &
+    _MOLE_PROJECT_CACHE_PREFETCH_PID=$!
+    _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST="$scan_manifest"
+}
+
+# Stop a prefetch nobody collected, as on a cancelled run. The scan's own
+# TERM trap stops its workers and removes their match files.
+stop_project_cache_prefetch() {
+    local prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+    local scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
+    _MOLE_PROJECT_CACHE_PREFETCH_PID=""
+    _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
+    if [[ -n "$prefetch_pid" ]]; then
+        kill -TERM "$prefetch_pid" 2> /dev/null || true
+        wait "$prefetch_pid" 2> /dev/null || true
+    fi
+    if [[ -n "$scan_manifest" ]]; then
+        rm -f "$scan_manifest" # SAFE: exact scratch file created by create_temp_file
+    fi
+    return 0
+}
+
+# Scan every discovered project root, at most four at a time. Writes one
+# "<status>\t<matches file>" line per scanned root, in root order, plus a
+# final "skipped\t<count>" line for roots that could not be scanned, to the
+# manifest file. Returns a signal status when interrupted, after removing the
+# match files.
+scan_project_cache_roots() {
+    local scan_manifest="$1"
     local -a scan_roots=()
     local root
     while IFS= read -r root; do
@@ -1033,9 +1112,6 @@ clean_project_caches() {
     done < <(discover_project_cache_roots)
 
     if [[ ${#scan_roots[@]} -eq 0 ]]; then
-        if [[ -t 1 ]]; then
-            stop_inline_spinner
-        fi
         return 0
     fi
 
@@ -1154,10 +1230,6 @@ clean_project_caches() {
     fi
     _restore_project_cache_scan_traps
 
-    if [[ -t 1 ]]; then
-        stop_inline_spinner
-    fi
-
     if [[ $scan_interrupt_status -ge 128 ]]; then
         local pending_file
         for pending_file in "${root_matches_files[@]}"; do
@@ -1166,6 +1238,31 @@ clean_project_caches() {
         return "$scan_interrupt_status"
     fi
 
+    local scan_index
+    {
+        for ((scan_index = 0; scan_index < ${#root_matches_files[@]}; scan_index++)); do
+            printf '%s\t%s\n' "${scan_statuses[$scan_index]:-1}" "${root_matches_files[$scan_index]}"
+        done
+        printf 'skipped\t%s\n' "$failed_scan_count"
+    } > "$scan_manifest"
+}
+
+# Process the roots a scan manifest lists, then report roots that were skipped.
+collect_project_cache_scans() {
+    local scan_manifest="$1"
+    local -a root_matches_files=() scan_statuses=()
+    local failed_scan_count=0 manifest_status manifest_value
+    while IFS=$'\t' read -r manifest_status manifest_value; do
+        if [[ "$manifest_status" == "skipped" ]]; then
+            failed_scan_count="$manifest_value"
+            continue
+        fi
+        scan_statuses+=("$manifest_status")
+        root_matches_files+=("$manifest_value")
+    done < "$scan_manifest"
+    [[ "$failed_scan_count" =~ ^[0-9]+$ ]] || failed_scan_count=0
+
+    local root_matches_file
     local scan_index
     for ((scan_index = 0; scan_index < ${#root_matches_files[@]}; scan_index++)); do
         local preflight_rc="${scan_statuses[$scan_index]:-1}"
