@@ -632,7 +632,7 @@ cleanup() {
 
     stop_inline_spinner 2> /dev/null || true
 
-    # Background measurement workers ignore SIGINT, so Ctrl-C alone leaves them running.
+    # Background jobs ignore SIGINT.
     stop_large_file_prefetch 2> /dev/null || true
 
     cleanup_temp_files
@@ -1864,7 +1864,6 @@ perform_cleanup() {
         fi
     }
     run_clean_sections || cleanup_cancel_rc=$?
-    # A cancelled run never reached Large files to collect the measurement.
     stop_large_file_prefetch
 
     # ===== Final summary =====

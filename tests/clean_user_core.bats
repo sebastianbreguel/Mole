@@ -3894,7 +3894,6 @@ run_with_timeout() {
 start_large_file_prefetch
 pool_pid="$_MOLE_LARGE_PREFETCH_PID"
 [[ -n "$pool_pid" ]] || exit 1
-# Later sections run meanwhile; here the pool simply finishes first.
 while kill -0 "$pool_pid" 2> /dev/null; do sleep 0.05; done
 measured_before_report=$(wc -l < "$HOME/du.calls" | tr -d ' ')
 [[ "$measured_before_report" == 1 ]] || { echo "BEFORE:$measured_before_report"; exit 1; }
@@ -3955,7 +3954,6 @@ EOF
     start_line=$(grep -n 'start_large_file_prefetch$' <<< "$code" | head -1 | cut -d: -f1)
     next_section_line=$(grep -n 'start_section "Apps & utilities"' <<< "$code" | head -1 | cut -d: -f1)
     [[ -n "$dev_line" && -n "$start_line" && -n "$next_section_line" ]] || return 1
-    # Not before: Developer tools prunes the pnpm store and other queued rows.
     [ "$dev_line" -lt "$start_line" ] || return 1
     [ "$start_line" -lt "$next_section_line" ] || return 1
     [ "$(grep -c 'stop_large_file_prefetch' <<< "$code")" -ge 2 ] || return 1

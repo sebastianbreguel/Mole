@@ -3241,11 +3241,8 @@ _large_prefetch_worktree_stop() {
     _lp_worktree_pid=""
 }
 
-# perform_cleanup starts the size pool and the worktree search as soon as
-# Developer tools is done, the last section that changes a queued row (pnpm
-# store prune, Gradle, conda, simulator data), so they run while the shorter
-# sections in between do. A row whose directory is gone by report time is
-# still skipped, because the report checks each path before reading its size.
+# Developer tools is the last section that changes a queued row (pnpm store
+# prune, Gradle, conda), so perform_cleanup starts the measurement right after it.
 _MOLE_LARGE_PREFETCH_DIR=""
 _MOLE_LARGE_PREFETCH_PID=""
 _MOLE_LARGE_PREFETCH_WORKTREE_PID=""
@@ -3259,7 +3256,6 @@ start_large_file_prefetch() {
     while IFS= read -r _lp_path; do
         [[ -n "$_lp_path" ]] && _lp_paths+=("$_lp_path")
     done < <(_large_prefetch_queue_rows)
-    # The report maps each path to its result file by queue position.
     printf '%s\n' "${_lp_paths[@]+"${_lp_paths[@]}"}" > "$_lp_dir/queue"
     (agent_worktree_containers > "$_lp_dir/worktrees.tmp" && mv "$_lp_dir/worktrees.tmp" "$_lp_dir/worktrees") < /dev/null > /dev/null 2>&1 &
     _MOLE_LARGE_PREFETCH_WORKTREE_PID=$!
@@ -3270,9 +3266,6 @@ start_large_file_prefetch() {
     _MOLE_LARGE_PREFETCH_DIR="$_lp_dir"
 }
 
-# Stop a measurement nobody collected, as on a cancelled run. The pool's own
-# TERM trap stops its du workers. Background jobs ignore SIGINT, so Ctrl-C
-# alone would leave them running.
 stop_large_file_prefetch() {
     local pool_pid="$_MOLE_LARGE_PREFETCH_PID"
     local worktree_pid="$_MOLE_LARGE_PREFETCH_WORKTREE_PID"
@@ -3327,7 +3320,6 @@ check_large_file_candidates() {
         local finished_pid=""
         mole_wait_for_any_worker finished_pid "$_lp_pool_pid" || body_rc=$?
         if [[ -z "$finished_pid" ]]; then
-            # The poll itself was interrupted; stop the pool still running.
             kill -TERM "$_lp_pool_pid" 2> /dev/null || true
             wait "$_lp_pool_pid" 2> /dev/null || true
             [[ $body_rc -ge 128 ]] || body_rc=130
