@@ -632,6 +632,9 @@ cleanup() {
 
     stop_inline_spinner 2> /dev/null || true
 
+    # Background measurement workers ignore SIGINT, so Ctrl-C alone leaves them running.
+    stop_large_file_prefetch 2> /dev/null || true
+
     cleanup_temp_files
 
     stop_sudo_session
@@ -1803,6 +1806,7 @@ perform_cleanup() {
             start_section "Developer tools"
             _run_cleanup_step clean_developer_tools || return $?
             end_section
+            start_large_file_prefetch
 
             # ===== 7. Apps & utilities =====
             start_section "Apps & utilities"
@@ -1860,6 +1864,8 @@ perform_cleanup() {
         fi
     }
     run_clean_sections || cleanup_cancel_rc=$?
+    # A cancelled run never reached Large files to collect the measurement.
+    stop_large_file_prefetch
 
     # ===== Final summary =====
     flush_idle_section_slot

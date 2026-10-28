@@ -3867,6 +3867,100 @@ EOF
     done
 }
 
+@test "large files reports a measurement started ahead of the section without measuring again" {
+    local review_home="$HOME/large-review-ahead"
+    mkdir -p "$review_home/.gradle/caches"
+    run env -u ANDROID_AVD_HOME -u ANDROID_HOME -u ANDROID_SDK_ROOT -u DENO_DIR -u FVM_CACHE_PATH -u HF_HOME -u MISE_DATA_DIR \
+        HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+start_section_spinner() { :; }
+stop_section_spinner() { :; }
+note_activity() { :; }
+docker() { return 1; }
+defaults() { return 1; }
+format_path_link() { printf '%s' "$1"; }
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        printf '%s\n' "${!#}" >> "$HOME/du.calls"
+        printf '2097152\t%s\n' "${!#}"
+        return 0
+    fi
+    "$@"
+}
+: > "$HOME/du.calls"
+start_large_file_prefetch
+pool_pid="$_MOLE_LARGE_PREFETCH_PID"
+[[ -n "$pool_pid" ]] || exit 1
+# Later sections run meanwhile; here the pool simply finishes first.
+while kill -0 "$pool_pid" 2> /dev/null; do sleep 0.05; done
+measured_before_report=$(wc -l < "$HOME/du.calls" | tr -d ' ')
+[[ "$measured_before_report" == 1 ]] || { echo "BEFORE:$measured_before_report"; exit 1; }
+check_large_file_candidates
+measured_total=$(wc -l < "$HOME/du.calls" | tr -d ' ')
+[[ "$measured_total" == 1 ]] || { echo "TOTAL:$measured_total"; cat "$HOME/du.calls"; exit 1; }
+[[ -z "$_MOLE_LARGE_PREFETCH_DIR" ]] || exit 1
+echo COLLECTED
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *COLLECTED* ]] || return 1
+    [[ "$output" == *"Gradle caches"* ]] || { echo "$output"; return 1; }
+}
+
+@test "stop_large_file_prefetch stops an uncollected measurement and its workers" {
+    local review_home="$HOME/large-review-stop"
+    mkdir -p "$review_home/.gradle/caches"
+    run env -u ANDROID_AVD_HOME -u ANDROID_HOME -u ANDROID_SDK_ROOT -u DENO_DIR -u FVM_CACHE_PATH -u HF_HOME -u MISE_DATA_DIR \
+        HOME="$review_home" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc << 'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/user.sh"
+run_with_timeout() {
+    shift
+    if [[ "$1" == du ]]; then
+        sh -c 'echo $PPID' > "$HOME/worker.pid"
+        while :; do sleep 0.1; done
+    fi
+    "$@"
+}
+rm -f "$HOME/worker.pid"
+start_large_file_prefetch
+pool_pid="$_MOLE_LARGE_PREFETCH_PID"
+prefetch_dir="$_MOLE_LARGE_PREFETCH_DIR"
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" ]] && break
+    sleep 0.05
+done
+worker_pid=$(cat "$HOME/worker.pid")
+[[ -n "$worker_pid" ]] || exit 1
+stop_large_file_prefetch
+sleep 0.3
+if kill -0 "$pool_pid" 2> /dev/null; then echo "POOL_ALIVE"; exit 1; fi
+if kill -0 "$worker_pid" 2> /dev/null; then echo "WORKER_ALIVE"; kill "$worker_pid"; exit 1; fi
+[[ ! -e "$prefetch_dir" ]] || { echo "DIR_LEFT"; exit 1; }
+[[ -z "$_MOLE_LARGE_PREFETCH_PID" ]] || exit 1
+echo STOPPED
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *STOPPED* ]] || return 1
+}
+
+@test "mo clean starts the large files measurement right after Developer tools and stops it on exit" {
+    local code
+    code=$(grep -vE '^[[:space:]]*#' "$PROJECT_ROOT/bin/clean.sh")
+    local dev_line start_line next_section_line
+    dev_line=$(grep -n '_run_cleanup_step clean_developer_tools' <<< "$code" | head -1 | cut -d: -f1)
+    start_line=$(grep -n 'start_large_file_prefetch$' <<< "$code" | head -1 | cut -d: -f1)
+    next_section_line=$(grep -n 'start_section "Apps & utilities"' <<< "$code" | head -1 | cut -d: -f1)
+    [[ -n "$dev_line" && -n "$start_line" && -n "$next_section_line" ]] || return 1
+    # Not before: Developer tools prunes the pnpm store and other queued rows.
+    [ "$dev_line" -lt "$start_line" ] || return 1
+    [ "$start_line" -lt "$next_section_line" ] || return 1
+    [ "$(grep -c 'stop_large_file_prefetch' <<< "$code")" -ge 2 ] || return 1
+}
+
 @test "large files queue lists every fixed HOME row the report measures" {
     local review_home="$HOME/large-review-drift"
     # Rows spelled as a literal $HOME path in the report are the ones a new

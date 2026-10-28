@@ -3241,13 +3241,77 @@ _large_prefetch_worktree_stop() {
     _lp_worktree_pid=""
 }
 
+# perform_cleanup starts the size pool and the worktree search as soon as
+# Developer tools is done, the last section that changes a queued row (pnpm
+# store prune, Gradle, conda, simulator data), so they run while the shorter
+# sections in between do. A row whose directory is gone by report time is
+# still skipped, because the report checks each path before reading its size.
+_MOLE_LARGE_PREFETCH_DIR=""
+_MOLE_LARGE_PREFETCH_PID=""
+_MOLE_LARGE_PREFETCH_WORKTREE_PID=""
+
+start_large_file_prefetch() {
+    [[ -z "$_MOLE_LARGE_PREFETCH_DIR" ]] || return 0
+    local -a _lp_paths=()
+    local _lp_dir="" _lp_max=4 _lp_interrupted=0 _lp_path
+    local _lp_deadline=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC))
+    _lp_dir=$(create_temp_dir) || return 0
+    while IFS= read -r _lp_path; do
+        [[ -n "$_lp_path" ]] && _lp_paths+=("$_lp_path")
+    done < <(_large_prefetch_queue_rows)
+    # The report maps each path to its result file by queue position.
+    printf '%s\n' "${_lp_paths[@]+"${_lp_paths[@]}"}" > "$_lp_dir/queue"
+    (agent_worktree_containers > "$_lp_dir/worktrees.tmp" && mv "$_lp_dir/worktrees.tmp" "$_lp_dir/worktrees") < /dev/null > /dev/null 2>&1 &
+    _MOLE_LARGE_PREFETCH_WORKTREE_PID=$!
+    if [[ ${#_lp_paths[@]} -gt 0 ]]; then
+        _large_prefetch_run < /dev/null > /dev/null 2>&1 &
+        _MOLE_LARGE_PREFETCH_PID=$!
+    fi
+    _MOLE_LARGE_PREFETCH_DIR="$_lp_dir"
+}
+
+# Stop a measurement nobody collected, as on a cancelled run. The pool's own
+# TERM trap stops its du workers. Background jobs ignore SIGINT, so Ctrl-C
+# alone would leave them running.
+stop_large_file_prefetch() {
+    local pool_pid="$_MOLE_LARGE_PREFETCH_PID"
+    local worktree_pid="$_MOLE_LARGE_PREFETCH_WORKTREE_PID"
+    local prefetch_dir="$_MOLE_LARGE_PREFETCH_DIR"
+    _MOLE_LARGE_PREFETCH_PID=""
+    _MOLE_LARGE_PREFETCH_WORKTREE_PID=""
+    _MOLE_LARGE_PREFETCH_DIR=""
+    if [[ -n "$pool_pid" ]]; then
+        kill -TERM "$pool_pid" 2> /dev/null || true
+        wait "$pool_pid" 2> /dev/null || true
+    fi
+    if [[ -n "$worktree_pid" ]]; then
+        pkill -TERM -P "$worktree_pid" 2> /dev/null || true
+        kill "$worktree_pid" 2> /dev/null || true
+        wait "$worktree_pid" 2> /dev/null || true
+    fi
+    if [[ -n "$prefetch_dir" ]]; then
+        rm -rf "$prefetch_dir" # SAFE: exact mktemp-created Large files measurement scratch directory
+    fi
+    return 0
+}
+
 # Large file candidates (report only, no deletion).
 check_large_file_candidates() {
     local -a _lp_paths=()
     local _lp_dir="" _lp_max=4 _lp_interrupted=0 _lp_worktree_pid="" _lp_worktree_listing=""
     local _lp_deadline=$((SECONDS + MOLE_TIMEOUT_HINT_SCAN_SEC))
-    local _lp_path
-    if _lp_dir=$(create_temp_dir); then
+    local _lp_path _lp_pool_pid=""
+    if [[ -n "$_MOLE_LARGE_PREFETCH_DIR" ]]; then
+        _lp_dir="$_MOLE_LARGE_PREFETCH_DIR"
+        _lp_pool_pid="$_MOLE_LARGE_PREFETCH_PID"
+        _lp_worktree_pid="$_MOLE_LARGE_PREFETCH_WORKTREE_PID"
+        _MOLE_LARGE_PREFETCH_DIR=""
+        _MOLE_LARGE_PREFETCH_PID=""
+        _MOLE_LARGE_PREFETCH_WORKTREE_PID=""
+        while IFS= read -r _lp_path; do
+            [[ -n "$_lp_path" ]] && _lp_paths+=("$_lp_path")
+        done < "$_lp_dir/queue"
+    elif _lp_dir=$(create_temp_dir); then
         while IFS= read -r _lp_path; do
             [[ -n "$_lp_path" ]] && _lp_paths+=("$_lp_path")
         done < <(_large_prefetch_queue_rows)
@@ -3259,7 +3323,16 @@ check_large_file_candidates() {
 
     start_section_spinner "Scanning large files..."
     local body_rc=0
-    if [[ -n "$_lp_dir" && ${#_lp_paths[@]} -gt 0 ]]; then
+    if [[ -n "$_lp_pool_pid" ]]; then
+        local finished_pid=""
+        mole_wait_for_any_worker finished_pid "$_lp_pool_pid" || body_rc=$?
+        if [[ -z "$finished_pid" ]]; then
+            # The poll itself was interrupted; stop the pool still running.
+            kill -TERM "$_lp_pool_pid" 2> /dev/null || true
+            wait "$_lp_pool_pid" 2> /dev/null || true
+            [[ $body_rc -ge 128 ]] || body_rc=130
+        fi
+    elif [[ -n "$_lp_dir" && ${#_lp_paths[@]} -gt 0 ]]; then
         _large_prefetch_run || body_rc=$?
     fi
     if [[ $body_rc -ge 128 ]]; then
