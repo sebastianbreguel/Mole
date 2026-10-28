@@ -632,7 +632,7 @@ cleanup() {
 
     stop_inline_spinner 2> /dev/null || true
 
-    # Background scan workers ignore SIGINT, so Ctrl-C alone leaves them running.
+    # Background jobs ignore SIGINT.
     stop_project_cache_prefetch 2> /dev/null || true
 
     cleanup_temp_files
@@ -1865,7 +1865,6 @@ perform_cleanup() {
         fi
     }
     run_clean_sections || cleanup_cancel_rc=$?
-    # A cancelled run never reached Developer tools to collect the scan.
     stop_project_cache_prefetch
 
     # ===== Final summary =====

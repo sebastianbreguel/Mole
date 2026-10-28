@@ -531,7 +531,6 @@ discover_project_cache_roots() {
 start_project_cache_prefetch
 prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
 [[ -n "$prefetch_pid" ]] || exit 1
-# Earlier sections run meanwhile; here the scan simply finishes first.
 while kill -0 "$prefetch_pid" 2> /dev/null; do sleep 0.05; done
 clean_project_caches
 discoveries=$(grep -c DISCOVER "$HOME/discover.trace")
@@ -588,7 +587,6 @@ EOF
     first_section_line=$(grep -n 'start_section "System"' <<< "$code" | head -1 | cut -d: -f1)
     [[ -n "$start_line" && -n "$first_section_line" ]] || return 1
     [ "$start_line" -lt "$first_section_line" ] || return 1
-    # Both the end of the section run and the exit trap stop an uncollected scan.
     [ "$(grep -c 'stop_project_cache_prefetch' <<< "$code")" -ge 2 ] || return 1
 }
 

@@ -1032,7 +1032,6 @@ clean_project_caches() {
         scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
         mole_wait_for_any_worker finished_pid "$prefetch_pid" || scan_rc=$?
         if [[ -z "$finished_pid" ]]; then
-            # The poll itself was interrupted; the scan is still running.
             stop_project_cache_prefetch
             if [[ -t 1 ]]; then
                 stop_inline_spinner
@@ -1051,7 +1050,6 @@ clean_project_caches() {
         stop_inline_spinner
     fi
 
-    # Only a signal from the scan cancels; processing keeps its own status.
     local collect_rc=0
     if [[ $scan_rc -ge 128 ]]; then
         collect_rc=$scan_rc
@@ -1064,11 +1062,8 @@ clean_project_caches() {
     return "$collect_rc"
 }
 
-# Project-cache scans only read project roots, and no clean section before
-# Developer tools writes there, so perform_cleanup starts them before the
-# first section and clean_project_caches collects the result. On a large
-# projects folder the scan is the slowest part of Developer tools, and every
-# match is still rechecked at the final sink.
+# The scan only reads project roots, which no section before Developer tools
+# writes, so perform_cleanup starts it early. Matches are rechecked at the sink.
 _MOLE_PROJECT_CACHE_PREFETCH_PID=""
 _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
 
@@ -1081,8 +1076,6 @@ start_project_cache_prefetch() {
     _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST="$scan_manifest"
 }
 
-# Stop a prefetch nobody collected, as on a cancelled run. The scan's own
-# TERM trap stops its workers and removes their match files.
 stop_project_cache_prefetch() {
     local prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
     local scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
@@ -1098,11 +1091,7 @@ stop_project_cache_prefetch() {
     return 0
 }
 
-# Scan every discovered project root, at most four at a time. Writes one
-# "<status>\t<matches file>" line per scanned root, in root order, plus a
-# final "skipped\t<count>" line for roots that could not be scanned, to the
-# manifest file. Returns a signal status when interrupted, after removing the
-# match files.
+# Writes one "<status>\t<matches file>" line per root, then "skipped\t<count>".
 scan_project_cache_roots() {
     local scan_manifest="$1"
     local -a scan_roots=()
@@ -1247,7 +1236,6 @@ scan_project_cache_roots() {
     } > "$scan_manifest"
 }
 
-# Process the roots a scan manifest lists, then report roots that were skipped.
 collect_project_cache_scans() {
     local scan_manifest="$1"
     local -a root_matches_files=() scan_statuses=()
