@@ -4719,9 +4719,6 @@ EOF
 
 @test "uv cache prune gives up on a held cache lock before the owner timeout" {
     mkdir -p "$HOME/uv-lock-cache" "$HOME/uv-lock-bin"
-    # A long-running `uvx` (an MCP server, a language server) holds the shared
-    # cache lock, so `uv cache prune` waits for it. Real uv waits up to
-    # UV_LOCK_TIMEOUT (300s by default) and then exits 2.
     cat > "$HOME/uv-lock-bin/uv" <<'SCRIPT'
 #!/bin/bash
 case "$*" in
