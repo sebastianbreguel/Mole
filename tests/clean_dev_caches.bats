@@ -4717,6 +4717,46 @@ EOF
     assert_owner_cleanup_requires_confirmed_root uv clean_uv_cache
 }
 
+@test "uv cache prune gives up on a held cache lock before the owner timeout" {
+    mkdir -p "$HOME/uv-lock-cache" "$HOME/uv-lock-bin"
+    # A long-running `uvx` (an MCP server, a language server) holds the shared
+    # cache lock, so `uv cache prune` waits for it. Real uv waits up to
+    # UV_LOCK_TIMEOUT (300s by default) and then exits 2.
+    cat > "$HOME/uv-lock-bin/uv" <<'SCRIPT'
+#!/bin/bash
+case "$*" in
+    --version) exit 0 ;;
+    'cache dir') printf '%s\n' "$HOME/uv-lock-cache" ;;
+    'cache prune')
+        printf 'LOCK_TIMEOUT:%s\n' "${UV_LOCK_TIMEOUT:-unset}" >> "$TRACE"
+        exit 2
+        ;;
+    *) exit 97 ;;
+esac
+SCRIPT
+    chmod +x "$HOME/uv-lock-bin/uv"
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" PATH="$HOME/uv-lock-bin:$PATH" \
+        TRACE="$HOME/uv-lock.trace" MOLE_TEST_NO_AUTH=1 /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/dev.sh"
+DRY_RUN=false
+WHITELIST_PATTERNS=()
+run_with_timeout() { shift; "$@"; }
+: > "$TRACE"
+rc=0
+clean_uv_cache || rc=$?
+[[ "$rc" == 0 ]] || { echo "RC:$rc"; exit 1; }
+lock_timeout=$(sed -n 's/^LOCK_TIMEOUT://p' "$TRACE")
+[[ "$lock_timeout" =~ ^[0-9]+$ ]] || { echo "LOCK_TIMEOUT:$lock_timeout"; exit 1; }
+[[ "$lock_timeout" -lt "$MOLE_TIMEOUT_PKG_CLEANUP_SEC" ]] || { echo "LOCK_TIMEOUT:$lock_timeout"; exit 1; }
+echo LOCK_BOUNDED
+EOF
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *LOCK_BOUNDED* ]] || return 1
+    [[ "$output" != *"uv cache"* ]] || return 1
+}
+
 @test "owner cache root validation propagates signals before any mutation" {
     run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" MOLE_TEST_NO_AUTH=1 \
         /bin/bash --noprofile --norc <<'EOF'

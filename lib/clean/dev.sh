@@ -139,7 +139,11 @@ clean_uv_cache() {
         # to check the default path and mutate a different one.
         [[ $cache_rc -eq 0 && "$detected_cache" == /* && "$detected_cache" != *$'\n'* ]] || return 0
         uv_cache_path="$detected_cache"
-        clean_tool_cache "uv cache" "$uv_cache_path" run_with_timeout "$MOLE_TIMEOUT_PKG_CLEANUP_SEC" uv cache prune || return $?
+        # A long-running `uvx` (an MCP or language server) holds the shared
+        # cache lock, and prune waits for it up to UV_LOCK_TIMEOUT (300s by
+        # default), so every run spent the full owner timeout and pruned
+        # nothing. Give up on a held lock early; the cache is kept as before.
+        UV_LOCK_TIMEOUT="$MOLE_TIMEOUT_SHORT_QUERY_SEC" clean_tool_cache "uv cache" "$uv_cache_path" run_with_timeout "$MOLE_TIMEOUT_PKG_CLEANUP_SEC" uv cache prune || return $?
     else
         safe_clean "$uv_cache_path"/* "uv cache"
     fi
