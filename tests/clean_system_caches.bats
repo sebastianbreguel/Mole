@@ -578,6 +578,166 @@ EOF
     [[ "$output" == *STOPPED* ]] || return 1
 }
 
+@test "clean_project_caches returns a signal that arrives while it waits for the prefetch" {
+    local scan_home="$HOME/prefetch-collect-term"
+    mkdir -p "$scan_home/root"
+    local driver="$scan_home/driver.sh"
+
+    cat > "$driver" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME/root"; }
+project_cache_root_is_walkable() { return 0; }
+get_optimal_parallel_jobs() { printf '1\n'; }
+scan_project_cache_root() {
+    sh -c 'echo $PPID' > "$HOME/worker.pid"
+    while :; do sleep 0.1; done
+}
+process_project_cache_matches() { touch "$HOME/sink-called"; }
+start_project_cache_prefetch
+touch "$HOME/collecting"
+rc=0
+clean_project_caches || rc=$?
+printf 'RC=%s\n' "$rc" > "$HOME/driver.rc"
+EOF
+    chmod +x "$driver"
+
+    run env HOME="$scan_home" PROJECT_ROOT="$PROJECT_ROOT" DRIVER="$driver" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+/bin/bash "$DRIVER" &
+driver_pid=$!
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" && -e "$HOME/collecting" ]] && break
+    sleep 0.05
+done
+[[ -s "$HOME/worker.pid" && -e "$HOME/collecting" ]] || exit 1
+worker_pid=$(cat "$HOME/worker.pid")
+sleep 0.3
+kill -TERM "$driver_pid"
+wait "$driver_pid" || true
+sleep 0.3
+if kill -0 "$worker_pid" 2> /dev/null; then echo "WORKER_ALIVE"; kill "$worker_pid"; exit 1; fi
+[[ ! -e "$HOME/sink-called" ]] || { echo "SINK_CALLED"; exit 1; }
+cat "$HOME/driver.rc"
+EOF
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == "RC=143" ]] || { echo "$output"; return 1; }
+}
+
+@test "a prefetch that ended on a signal feeds nothing to the project cache sink" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME"; }
+project_cache_root_is_walkable() { return 0; }
+scan_project_cache_root() {
+    printf '%s\n' "$HOME/found-cache" > "$2"
+    sh -c 'echo $PPID' > "$HOME/worker.pid"
+    while :; do sleep 0.1; done
+}
+process_project_cache_matches() { touch "$HOME/sink-called"; }
+rm -f "$HOME/worker.pid" "$HOME/sink-called"
+start_project_cache_prefetch
+for _ in $(seq 100); do
+    [[ -s "$HOME/worker.pid" ]] && break
+    sleep 0.05
+done
+[[ -s "$HOME/worker.pid" ]] || exit 1
+kill -TERM "$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+rc=0
+clean_project_caches || rc=$?
+[[ "$rc" == 143 ]] || { echo "RC:$rc"; exit 1; }
+[[ ! -e "$HOME/sink-called" ]] || { echo "SINK_CALLED"; exit 1; }
+echo NO_SINK
+EOF
+    rm -f "$HOME/worker.pid" "$HOME/sink-called"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *NO_SINK* ]] || return 1
+}
+
+@test "stop_project_cache_prefetch never signals a scan that already finished" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { :; }
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+[[ -n "$prefetch_pid" ]] || exit 1
+for _ in $(seq 100); do
+    kill -0 "$prefetch_pid" 2> /dev/null || break
+    sleep 0.05
+done
+if kill -0 "$prefetch_pid" 2> /dev/null; then echo "STILL_RUNNING"; exit 1; fi
+kill() { printf '%s\n' "$*" >> "$HOME/kill.calls"; builtin kill "$@"; }
+: > "$HOME/kill.calls"
+stop_project_cache_prefetch
+if grep -q -- "$prefetch_pid" "$HOME/kill.calls"; then echo "SIGNALLED"; exit 1; fi
+echo NOT_SIGNALLED
+EOF
+    rm -f "$HOME/kill.calls"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *NOT_SIGNALLED* ]] || return 1
+}
+
+@test "stop_project_cache_prefetch never signals a scan terminated before its own traps" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() {
+    touch "$HOME/discovering"
+    sleep 1
+}
+rm -f "$HOME/discovering"
+start_project_cache_prefetch
+prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
+for _ in $(seq 100); do
+    [[ -e "$HOME/discovering" ]] && break
+    sleep 0.05
+done
+[[ -e "$HOME/discovering" ]] || exit 1
+builtin kill -TERM "$prefetch_pid"
+for _ in $(seq 100); do
+    kill -0 "$prefetch_pid" 2> /dev/null || break
+    sleep 0.05
+done
+if kill -0 "$prefetch_pid" 2> /dev/null; then echo "STILL_RUNNING"; exit 1; fi
+kill() { printf '%s\n' "$*" >> "$HOME/kill.calls"; builtin kill "$@"; }
+: > "$HOME/kill.calls"
+stop_project_cache_prefetch
+if grep -q -- "$prefetch_pid" "$HOME/kill.calls"; then echo "SIGNALLED"; exit 1; fi
+echo NOT_SIGNALLED
+EOF
+    rm -f "$HOME/kill.calls" "$HOME/discovering"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *NOT_SIGNALLED* ]] || return 1
+}
+
+@test "scan_project_cache_roots returns an interrupt that arrives before any root is queued" {
+    run env HOME="$HOME" PROJECT_ROOT="$PROJECT_ROOT" /bin/bash --noprofile --norc <<'EOF'
+set -euo pipefail
+source "$PROJECT_ROOT/lib/core/common.sh"
+source "$PROJECT_ROOT/lib/clean/caches.sh"
+discover_project_cache_roots() { printf '%s\n' "$HOME"; }
+project_cache_root_is_walkable() { return 130; }
+manifest="$HOME/interrupted.manifest"
+: > "$manifest"
+rc=0
+scan_project_cache_roots "$manifest" || rc=$?
+[[ "$rc" == 130 ]] || { echo "RC:$rc"; exit 1; }
+[[ ! -s "$manifest" ]] || { echo "MANIFEST_WRITTEN"; exit 1; }
+echo INTERRUPTED
+EOF
+    rm -f "$HOME/interrupted.manifest"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *INTERRUPTED* ]] || return 1
+}
+
 @test "mo clean starts the project cache scan before its first section and stops it on exit" {
     local clean_source="$PROJECT_ROOT/bin/clean.sh"
     local code

@@ -1028,18 +1028,22 @@ clean_project_caches() {
 
     local scan_manifest="" scan_rc=0
     if [[ -n "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]]; then
-        local prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID" finished_pid=""
         scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
-        mole_wait_for_any_worker finished_pid "$prefetch_pid" || scan_rc=$?
-        if [[ -z "$finished_pid" ]]; then
+        _wait_project_cache_prefetch || scan_rc=$?
+        if [[ $_MOLE_PROJECT_CACHE_PREFETCH_SIGNAL -ge 128 ]]; then
+            # Interrupted while waiting: stop the scan, as the inline scan's
+            # own traps would, and let the step record the cancellation.
+            scan_rc=$_MOLE_PROJECT_CACHE_PREFETCH_SIGNAL
             stop_project_cache_prefetch
             if [[ -t 1 ]]; then
                 stop_inline_spinner
             fi
             return "$scan_rc"
         fi
+        rm -f "$_MOLE_PROJECT_CACHE_PREFETCH_DONE" # SAFE: exact scratch file created by create_temp_file
         _MOLE_PROJECT_CACHE_PREFETCH_PID=""
         _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
+        _MOLE_PROJECT_CACHE_PREFETCH_DONE=""
     elif scan_manifest=$(create_temp_file); then
         scan_project_cache_roots "$scan_manifest" || scan_rc=$?
     else
@@ -1066,27 +1070,92 @@ clean_project_caches() {
 # writes, so perform_cleanup starts it early. Matches are rechecked at the sink.
 _MOLE_PROJECT_CACHE_PREFETCH_PID=""
 _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
+# Written when the scan exits. Bash frees a finished job's PID at once, so
+# stop signals the PID only while this is still empty.
+_MOLE_PROJECT_CACHE_PREFETCH_DONE=""
+_MOLE_PROJECT_CACHE_PREFETCH_SIGNAL=0
 
 start_project_cache_prefetch() {
     [[ -z "$_MOLE_PROJECT_CACHE_PREFETCH_PID" ]] || return 0
-    local scan_manifest
+    local scan_manifest done_marker
     scan_manifest=$(create_temp_file) || return 0
-    scan_project_cache_roots "$scan_manifest" < /dev/null > /dev/null 2>&1 &
-    _MOLE_PROJECT_CACHE_PREFETCH_PID=$!
+    if ! done_marker=$(create_temp_file); then
+        rm -f "$scan_manifest" # SAFE: exact scratch file created by create_temp_file
+        return 0
+    fi
     _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST="$scan_manifest"
+    _MOLE_PROJECT_CACHE_PREFETCH_DONE="$done_marker"
+
+    # A signal between the launch and the PID assignment would reach the
+    # caller's trap with no PID to stop, so hold it until both are set.
+    local launch_signal=0 previous_int_trap previous_term_trap
+    previous_int_trap=$(trap -p INT || true)
+    previous_term_trap=$(trap -p TERM || true)
+    trap 'launch_signal=130' INT
+    trap 'launch_signal=143' TERM
+    {
+        # Mark every exit, including a TERM before the scan installs its own
+        # traps and an errexit abort.
+        trap 'printf "done\n" > "$done_marker"' EXIT
+        trap 'exit 143' TERM
+        local scan_rc=0
+        scan_project_cache_roots "$scan_manifest" || scan_rc=$?
+        exit "$scan_rc"
+    } < /dev/null > /dev/null 2>&1 &
+    _MOLE_PROJECT_CACHE_PREFETCH_PID=$!
+    trap - INT TERM
+    # eval: restore caller traps captured by $(trap -p)
+    [[ -n "$previous_int_trap" ]] && eval "$previous_int_trap"
+    [[ -n "$previous_term_trap" ]] && eval "$previous_term_trap"
+
+    if [[ $launch_signal -ge 128 ]]; then
+        stop_project_cache_prefetch
+        if [[ $launch_signal -eq 130 ]]; then
+            kill -INT $$
+        else
+            kill -TERM $$
+        fi
+    fi
+    return 0
+}
+
+# Returns the scan's own status and sets _MOLE_PROJECT_CACHE_PREFETCH_SIGNAL
+# when INT or TERM arrives first. wait reads the status bash saved for the
+# job, so a reused PID is never polled.
+_wait_project_cache_prefetch() {
+    _MOLE_PROJECT_CACHE_PREFETCH_SIGNAL=0
+    local wait_signal=0 wait_rc=0 previous_int_trap previous_term_trap
+    previous_int_trap=$(trap -p INT || true)
+    previous_term_trap=$(trap -p TERM || true)
+    trap 'wait_signal=130' INT
+    trap 'wait_signal=143' TERM
+    wait "$_MOLE_PROJECT_CACHE_PREFETCH_PID" 2> /dev/null || wait_rc=$?
+    trap - INT TERM
+    # eval: restore caller traps captured by $(trap -p)
+    [[ -n "$previous_int_trap" ]] && eval "$previous_int_trap"
+    [[ -n "$previous_term_trap" ]] && eval "$previous_term_trap"
+    _MOLE_PROJECT_CACHE_PREFETCH_SIGNAL=$wait_signal
+    return "$wait_rc"
 }
 
 stop_project_cache_prefetch() {
     local prefetch_pid="$_MOLE_PROJECT_CACHE_PREFETCH_PID"
     local scan_manifest="$_MOLE_PROJECT_CACHE_PREFETCH_MANIFEST"
+    local done_marker="$_MOLE_PROJECT_CACHE_PREFETCH_DONE"
     _MOLE_PROJECT_CACHE_PREFETCH_PID=""
     _MOLE_PROJECT_CACHE_PREFETCH_MANIFEST=""
+    _MOLE_PROJECT_CACHE_PREFETCH_DONE=""
     if [[ -n "$prefetch_pid" ]]; then
-        kill -TERM "$prefetch_pid" 2> /dev/null || true
+        if [[ -n "$done_marker" && ! -s "$done_marker" ]]; then
+            kill -TERM "$prefetch_pid" 2> /dev/null || true
+        fi
         wait "$prefetch_pid" 2> /dev/null || true
     fi
     if [[ -n "$scan_manifest" ]]; then
         rm -f "$scan_manifest" # SAFE: exact scratch file created by create_temp_file
+    fi
+    if [[ -n "$done_marker" ]]; then
+        rm -f "$done_marker" # SAFE: exact scratch file created by create_temp_file
     fi
     return 0
 }
@@ -1221,7 +1290,7 @@ scan_project_cache_roots() {
 
     if [[ $scan_interrupt_status -ge 128 ]]; then
         local pending_file
-        for pending_file in "${root_matches_files[@]}"; do
+        for pending_file in "${root_matches_files[@]+"${root_matches_files[@]}"}"; do
             rm -f "$pending_file" # SAFE: exact scratch file created by create_temp_file above
         done
         return "$scan_interrupt_status"
